@@ -1,5 +1,6 @@
 #[macro_use]
 extern crate log;
+extern crate crc16;
 
 use std::io::{self, Read, Write};
 use std::ops::Add;
@@ -7,14 +8,11 @@ use std::convert::From;
 
 // TODO: Send CAN byte after too many errors
 // TODO: Handle CAN bytes while sending
-// TODO: Use CRC-16.
-// TODO pull config into struct with builder pattern
 
 const SOH: u8 = 0x01;
 const STX: u8 = 0x02;
 const EOT: u8 = 0x04;
 const ACK: u8 = 0x06;
-const DLE: u8 = 0x10;
 const NAK: u8 = 0x15;
 const CAN: u8 = 0x18;
 const CRC: u8 = 0x67;
@@ -153,12 +151,24 @@ impl Xmodem {
             }
 
             block_num += 1;
-            buff[0] = SOH;
+            buff[0] = match self.block_length {
+                BlockLength::Standard => SOH,
+                BlockLength::OneK => STX,
+            };
             buff[1] = (block_num & 0xFF) as u8;
             buff[2] = 0xFF - buff[1];
-            // TODO support 16-bit CRC.
-            let checksum = calc_checksum(&buff);
-            buff.push(checksum);
+
+            match self.checksum_mode {
+                Checksum::Standard => {
+                    let checksum = calc_checksum(&buff);
+                    buff.push(checksum);
+                },
+                Checksum::CRC16 => {
+                    let crc = calc_crc(&buff);
+                    buff.push(((crc >> 8) & 0xFF) as u8);
+                    buff.push((crc & 0xFF) as u8);
+                }
+            }
 
             debug!("Sending block {}", block_num);
             try!(dev.write_all(&buff));
@@ -226,6 +236,10 @@ impl Xmodem {
 
 fn calc_checksum(data: &[u8]) -> u8 {
     data.iter().fold(0, Add::add)
+}
+
+fn calc_crc(data: &[u8]) -> u16 {
+    crc16::State::<crc16::XMODEM>::calculate(data)
 }
 
 fn get_byte<R: Read>(reader: &mut R) -> std::io::Result<u8> {

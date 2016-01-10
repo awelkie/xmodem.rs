@@ -5,3 +5,4 @@ authors = ["Allen Welkie <allen.welkie@gmail.com>"]
 
 [dependencies]
 log = "^0.3"
+crc16 = "^0.3"
