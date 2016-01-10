@@ -93,8 +93,8 @@ impl Xmodem {
     pub fn start_send<D: Read + Write>(&mut self, dev: &mut D) -> Result<()> {
         let mut cancels = 0u32;
         loop {
-            match get_byte(dev) {
-                Ok(c) => {
+            match try!(get_byte_timeout(dev)) {
+                Some(c) => {
                     match c {
                         NAK => {
                             debug!("Standard checksum requested");
@@ -113,13 +113,7 @@ impl Xmodem {
                         c => warn!("Unknown byte received at start of XMODEM transfer: {}", c),
                     }
                 },
-                Err(err) => {
-                    if err.kind() == io::ErrorKind::TimedOut {
-                        warn!("Timed out waiting for start of XMODEM transfer.");
-                    } else {
-                        return Err(From::from(err));
-                    }
-                },
+                None => warn!("Timed out waiting for start of XMODEM transfer."),
             }
 
             self.errors += 1;
@@ -173,8 +167,8 @@ impl Xmodem {
             debug!("Sending block {}", block_num);
             try!(dev.write_all(&buff));
 
-            match get_byte(dev) {
-                Ok(c) => {
+            match try!(get_byte_timeout(dev)) {
+                Some(c) => {
                     if c == ACK {
                         debug!("Received ACK for block {}", block_num);
                         continue
@@ -183,13 +177,7 @@ impl Xmodem {
                     }
                     // TODO handle CAN bytes
                 },
-                Err(err) => {
-                    if err.kind() == io::ErrorKind::TimedOut {
-                        warn!("Timeout waiting for ACK for block {}", block_num);
-                    } else {
-                        return Err(From::from(err));
-                    }
-                },
+                None => warn!("Timeout waiting for ACK for block {}", block_num),
             }
 
             self.errors += 1;
@@ -206,8 +194,8 @@ impl Xmodem {
         loop {
             try!(dev.write_all(&[EOT]));
 
-            match get_byte(dev) {
-                Ok(c) => {
+            match try!(get_byte_timeout(dev)) {
+                Some(c) => {
                     if c == ACK {
                         info!("XMODEM transmission successful");
                         return Ok(());
@@ -215,13 +203,7 @@ impl Xmodem {
                         warn!("Expected ACK, got {}", c);
                     }
                 },
-                Err(err) => {
-                    if err.kind() == io::ErrorKind::TimedOut {
-                        warn!("Timeout waiting for ACK for EOT");
-                    } else {
-                        return Err(From::from(err));
-                    }
-                },
+                None => warn!("Timeout waiting for ACK for EOT"),
             }
 
             self.errors += 1;
@@ -246,4 +228,18 @@ fn get_byte<R: Read>(reader: &mut R) -> std::io::Result<u8> {
     let mut buff = [0];
     try!(reader.read_exact(&mut buff));
     Ok(buff[0])
+}
+
+/// Turns timeout errors into `Ok(None)`
+fn get_byte_timeout<R: Read>(reader: &mut R) -> std::io::Result<Option<u8>> {
+    match get_byte(reader) {
+        Ok(c) => Ok(Some(c)),
+        Err(err) => {
+            if err.kind() == io::ErrorKind::TimedOut {
+                Ok(None)
+            } else {
+                Err(err)
+            }
+        }
+    }
 }
