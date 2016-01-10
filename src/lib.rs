@@ -1,11 +1,9 @@
 #[macro_use]
 extern crate log;
-extern crate serial;
 
-use std::io::{self, Read};
+use std::io::{self, Read, Write};
 use std::ops::Add;
 use std::convert::From;
-use serial::SerialDevice;
 
 const SOH: u8 = 0x01;
 const STX: u8 = 0x02;
@@ -35,7 +33,7 @@ enum Checksum {
     CRC16,
 }
 
-pub fn xmodem_send<D: SerialDevice, R: io::Read>(dev: &mut D, stream: &mut R, max_retries: u32) -> Result<()> {
+pub fn xmodem_send<D: Read + Write, R: Read>(dev: &mut D, stream: &mut R, max_retries: u32) -> Result<()> {
     debug!("Starting XMODEM transfer");
     let checksum_mode = try!(xmodem_send_start(dev, max_retries));
     debug!("First byte received. Sending stream.");
@@ -46,7 +44,7 @@ pub fn xmodem_send<D: SerialDevice, R: io::Read>(dev: &mut D, stream: &mut R, ma
     Ok(())
 }
 
-fn xmodem_send_start<D: SerialDevice>(dev: &mut D, max_retries: u32) -> Result<Checksum> {
+fn xmodem_send_start<D: Read + Write>(dev: &mut D, max_retries: u32) -> Result<Checksum> {
     let mut errors = 0u32;
     let mut cancels = 0u32;
     loop {
@@ -94,7 +92,7 @@ fn xmodem_send_start<D: SerialDevice>(dev: &mut D, max_retries: u32) -> Result<C
     }
 }
 
-fn xmodem_send_stream<D: SerialDevice, R: io::Read>(dev: &mut D, stream: &mut R, max_retries: u32) -> Result<()> {
+fn xmodem_send_stream<D: Read + Write, R: Read>(dev: &mut D, stream: &mut R, max_retries: u32) -> Result<()> {
     let mut errors = 0u32;
     let mut block_num = 0u32;
     let pad = 0x1a;
@@ -147,7 +145,7 @@ fn xmodem_send_stream<D: SerialDevice, R: io::Read>(dev: &mut D, stream: &mut R,
     }
 }
 
-fn xmodem_finish_send<D: SerialDevice>(dev: &mut D, max_retries: u32) -> Result<()> {
+fn xmodem_finish_send<D: Read + Write>(dev: &mut D, max_retries: u32) -> Result<()> {
     let mut errors = 0u32;
     loop {
         try!(dev.write_all(&[EOT]));
