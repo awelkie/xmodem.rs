@@ -3,11 +3,11 @@ extern crate log;
 extern crate crc16;
 
 use std::io::{self, Read, Write};
-use std::ops::Add;
 use std::convert::From;
 
 // TODO: Send CAN byte after too many errors
 // TODO: Handle CAN bytes while sending
+// TODO: Implement Error for Error
 
 const SOH: u8 = 0x01;
 const STX: u8 = 0x02;
@@ -19,6 +19,7 @@ const CRC: u8 = 0x67;
 
 pub type Result<T> = std::result::Result<T, Error>;
 
+#[derive(Debug)]
 pub enum Error {
     Io(io::Error),
     ExhaustedRetries,
@@ -43,6 +44,7 @@ pub enum BlockLength {
     OneK = 1024,
 }
 
+#[derive(Copy, Clone, Debug)]
 pub struct Xmodem {
     max_errors: u32,
     errors: u32,
@@ -217,7 +219,7 @@ impl Xmodem {
 }
 
 fn calc_checksum(data: &[u8]) -> u8 {
-    data.iter().fold(0, Add::add)
+    data.iter().fold(0, |x, &y| x.wrapping_add(y))
 }
 
 fn calc_crc(data: &[u8]) -> u16 {
