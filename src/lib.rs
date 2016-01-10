@@ -5,6 +5,11 @@ use std::io::{self, Read, Write};
 use std::ops::Add;
 use std::convert::From;
 
+// TODO: Send CAN byte after too many errors
+// TODO: Handle CAN bytes while sending
+// TODO: Use CRC-16.
+// TODO pull config into struct with builder pattern
+
 const SOH: u8 = 0x01;
 const STX: u8 = 0x02;
 const EOT: u8 = 0x04;
@@ -28,150 +33,193 @@ impl From<io::Error> for Error {
     }
 }
 
+#[derive(Copy, Clone, Debug)]
 enum Checksum {
     Standard,
     CRC16,
 }
 
-pub fn xmodem_send<D: Read + Write, R: Read>(dev: &mut D, stream: &mut R, max_retries: u32) -> Result<()> {
-    debug!("Starting XMODEM transfer");
-    let checksum_mode = try!(xmodem_send_start(dev, max_retries));
-    debug!("First byte received. Sending stream.");
-    try!(xmodem_send_stream(dev, stream, max_retries));
-    debug!("Sending EOT");
-    try!(xmodem_finish_send(dev, max_retries));
-
-    Ok(())
+#[derive(Copy, Clone, Debug)]
+pub enum BlockLength {
+    Standard = 128,
+    OneK = 1024,
 }
 
-fn xmodem_send_start<D: Read + Write>(dev: &mut D, max_retries: u32) -> Result<Checksum> {
-    let mut errors = 0u32;
-    let mut cancels = 0u32;
-    loop {
-        match get_byte(dev) {
-            Ok(c) => {
-                match c {
-                    NAK => {
-                        debug!("Standard checksum requested");
-                        return Ok(Checksum::Standard);
-                    }
-                    CRC => {
-                        debug!("16-bit CRC requested");
-                        return Ok(Checksum::CRC16);
-                    }
-                    CAN => {
-                        warn!("Cancel (CAN) byte received");
-                        cancels += 1;
-                    },
-                    c => warn!("Unknown byte received at start of XMODEM transfer: {}", c),
-                }
-            },
-            Err(err) => {
-                if err.kind() == io::ErrorKind::TimedOut {
-                    warn!("Timed out waiting for start of XMODEM transfer.");
-                } else {
-                    return Err(From::from(err));
-                }
-            },
-        }
+pub struct Xmodem {
+    max_errors: u32,
+    errors: u32,
+    pad_byte: u8,
+    block_length: BlockLength,
+    checksum_mode: Checksum,
+}
 
-        errors += 1;
-
-        if cancels >= 2 {
-            error!("Transmission canceled: received two cancel (CAN) bytes \
-                    at start of XMODEM transfer");
-            return Err(Error::Canceled);
-        }
-
-        if errors >= max_retries {
-            error!("Exhausted max retries ({}) at start of XMODEM transfer.", max_retries);
-            // TODO send CAN in this case.
-            return Err(Error::ExhaustedRetries);
+impl Xmodem {
+    pub fn new() -> Self {
+        Xmodem {
+            max_errors: 16,
+            errors: 0,
+            pad_byte: 0x1a,
+            block_length: BlockLength::Standard,
+            checksum_mode: Checksum::Standard,
         }
     }
-}
 
-fn xmodem_send_stream<D: Read + Write, R: Read>(dev: &mut D, stream: &mut R, max_retries: u32) -> Result<()> {
-    let mut errors = 0u32;
-    let mut block_num = 0u32;
-    let pad = 0x1a;
-    let block_size = 128;
-    loop {
-        let mut buff = vec![pad; block_size + 3];
-        let n = try!(stream.read(&mut buff[3..]));
-        if n == 0 {
-            debug!("Reached EOF");
-            return Ok(());
-        }
+    pub fn block_length<'a>(&'a mut self, block_length: BlockLength) -> &'a mut Self {
+        self.block_length = block_length;
+        self
+    }
 
-        block_num += 1;
-        buff[0] = SOH;
-        buff[1] = (block_num & 0xFF) as u8;
-        buff[2] = 0xFF - buff[1];
-        // TODO support 16-bit CRC.
-        let checksum = calc_checksum(&buff);
-        buff.push(checksum);
+    pub fn max_errors<'a>(&'a mut self, max_errors: u32) -> &'a mut Self {
+        self.max_errors = max_errors;
+        self
+    }
 
-        debug!("Sending block {}", block_num);
-        try!(dev.write_all(&buff));
+    pub fn pad_byte<'a>(&'a mut self, pad_byte: u8) -> &'a mut Self {
+        self.pad_byte = pad_byte;
+        self
+    }
 
-        match get_byte(dev) {
-            Ok(c) => {
-                if c == ACK {
-                    debug!("Received ACK for block {}", block_num);
-                    continue
-                } else {
-                    warn!("Expected ACK, got {}", c);
+    pub fn send<D: Read + Write, R: Read>(&mut self, dev: &mut D, stream: &mut R) -> Result<()> {
+        self.errors = 0;
+
+        debug!("Starting XMODEM transfer");
+        try!(self.start_send(dev));
+        debug!("First byte received. Sending stream.");
+        try!(self.send_stream(dev, stream));
+        debug!("Sending EOT");
+        try!(self.finish_send(dev));
+
+        Ok(())
+    }
+
+    pub fn start_send<D: Read + Write>(&mut self, dev: &mut D) -> Result<()> {
+        let mut cancels = 0u32;
+        loop {
+            match get_byte(dev) {
+                Ok(c) => {
+                    match c {
+                        NAK => {
+                            debug!("Standard checksum requested");
+                            self.checksum_mode = Checksum::Standard;
+                            return Ok(());
+                        }
+                        CRC => {
+                            debug!("16-bit CRC requested");
+                            self.checksum_mode = Checksum::CRC16;
+                            return Ok(());
+                        }
+                        CAN => {
+                            warn!("Cancel (CAN) byte received");
+                            cancels += 1;
+                        },
+                        c => warn!("Unknown byte received at start of XMODEM transfer: {}", c),
+                    }
+                },
+                Err(err) => {
+                    if err.kind() == io::ErrorKind::TimedOut {
+                        warn!("Timed out waiting for start of XMODEM transfer.");
+                    } else {
+                        return Err(From::from(err));
+                    }
+                },
+            }
+
+            self.errors += 1;
+
+            if cancels >= 2 {
+                error!("Transmission canceled: received two cancel (CAN) bytes \
+                        at start of XMODEM transfer");
+                return Err(Error::Canceled);
+            }
+
+            if self.errors >= self.max_errors {
+                error!("Exhausted max retries ({}) at start of XMODEM transfer.", self.max_errors);
+                if let Err(err) = dev.write_all(&[CAN]) {
+                    warn!("Error sending CAN byte: {}", err);
                 }
-                // TODO handle CAN bytes
-            },
-            Err(err) => {
-                if err.kind() == io::ErrorKind::TimedOut {
-                    warn!("Timeout waiting for ACK for block {}", block_num);
-                } else {
-                    return Err(From::from(err));
-                }
-            },
-        }
-
-        errors += 1;
-
-        if errors >= max_retries {
-            error!("Exhausted max retries ({}) while sending block {} in XMODEM transfer",
-                   max_retries, block_num);
-            return Err(Error::ExhaustedRetries);
+                return Err(Error::ExhaustedRetries);
+            }
         }
     }
-}
 
-fn xmodem_finish_send<D: Read + Write>(dev: &mut D, max_retries: u32) -> Result<()> {
-    let mut errors = 0u32;
-    loop {
-        try!(dev.write_all(&[EOT]));
+    fn send_stream<D: Read + Write, R: Read>(&mut self, dev: &mut D, stream: &mut R) -> Result<()> {
+        let mut block_num = 0u32;
+        loop {
+            let mut buff = vec![self.pad_byte; self.block_length as usize + 3];
+            let n = try!(stream.read(&mut buff[3..]));
+            if n == 0 {
+                debug!("Reached EOF");
+                return Ok(());
+            }
 
-        match get_byte(dev) {
-            Ok(c) => {
-                if c == ACK {
-                    info!("XMODEM transmission successful");
-                    return Ok(());
-                } else {
-                    warn!("Expected ACK, got {}", c);
-                }
-            },
-            Err(err) => {
-                if err.kind() == io::ErrorKind::TimedOut {
-                    warn!("Timeout waiting for ACK for EOT");
-                } else {
-                    return Err(From::from(err));
-                }
-            },
+            block_num += 1;
+            buff[0] = SOH;
+            buff[1] = (block_num & 0xFF) as u8;
+            buff[2] = 0xFF - buff[1];
+            // TODO support 16-bit CRC.
+            let checksum = calc_checksum(&buff);
+            buff.push(checksum);
+
+            debug!("Sending block {}", block_num);
+            try!(dev.write_all(&buff));
+
+            match get_byte(dev) {
+                Ok(c) => {
+                    if c == ACK {
+                        debug!("Received ACK for block {}", block_num);
+                        continue
+                    } else {
+                        warn!("Expected ACK, got {}", c);
+                    }
+                    // TODO handle CAN bytes
+                },
+                Err(err) => {
+                    if err.kind() == io::ErrorKind::TimedOut {
+                        warn!("Timeout waiting for ACK for block {}", block_num);
+                    } else {
+                        return Err(From::from(err));
+                    }
+                },
+            }
+
+            self.errors += 1;
+
+            if self.errors >= self.max_errors {
+                error!("Exhausted max retries ({}) while sending block {} in XMODEM transfer",
+                       self.max_errors, block_num);
+                return Err(Error::ExhaustedRetries);
+            }
         }
+    }
 
-        errors += 1;
+    fn finish_send<D: Read + Write>(&mut self, dev: &mut D) -> Result<()> {
+        loop {
+            try!(dev.write_all(&[EOT]));
 
-        if errors >= max_retries {
-            error!("Exhausted max retries ({}) while waiting for ACK for EOT", max_retries);
-            return Err(Error::ExhaustedRetries);
+            match get_byte(dev) {
+                Ok(c) => {
+                    if c == ACK {
+                        info!("XMODEM transmission successful");
+                        return Ok(());
+                    } else {
+                        warn!("Expected ACK, got {}", c);
+                    }
+                },
+                Err(err) => {
+                    if err.kind() == io::ErrorKind::TimedOut {
+                        warn!("Timeout waiting for ACK for EOT");
+                    } else {
+                        return Err(From::from(err));
+                    }
+                },
+            }
+
+            self.errors += 1;
+
+            if self.errors >= self.max_errors {
+                error!("Exhausted max retries ({}) while waiting for ACK for EOT", self.max_errors);
+                return Err(Error::ExhaustedRetries);
+            }
         }
     }
 }
