@@ -3,6 +3,7 @@ name = "xmodem"
 version = "0.1.0"
 authors = ["Allen Welkie <allen.welkie@gmail.com>"]
 keywords = ["xmodem", "ymodem", "zmodem", "serial"]
+repository = "https://github.com/awelkie/xmodem.rs"
 license = "MIT"
 description = "An implementation of the XMODEM file-transfer protocol."
 
