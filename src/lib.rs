@@ -15,7 +15,7 @@ const EOT: u8 = 0x04;
 const ACK: u8 = 0x06;
 const NAK: u8 = 0x15;
 const CAN: u8 = 0x18;
-const CRC: u8 = 0x67;
+const CRC: u8 = 0x43;
 
 pub type Result<T> = std::result::Result<T, Error>;
 
