@@ -46,37 +46,22 @@ pub enum BlockLength {
 
 #[derive(Copy, Clone, Debug)]
 pub struct Xmodem {
-    max_errors: u32,
-    errors: u32,
-    pad_byte: u8,
-    block_length: BlockLength,
+    pub max_errors: u32,
+    pub pad_byte: u8,
+    pub block_length: BlockLength,
     checksum_mode: Checksum,
+    errors: u32,
 }
 
 impl Xmodem {
     pub fn new() -> Self {
         Xmodem {
             max_errors: 16,
-            errors: 0,
             pad_byte: 0x1a,
             block_length: BlockLength::Standard,
             checksum_mode: Checksum::Standard,
+            errors: 0,
         }
-    }
-
-    pub fn block_length<'a>(&'a mut self, block_length: BlockLength) -> &'a mut Self {
-        self.block_length = block_length;
-        self
-    }
-
-    pub fn max_errors<'a>(&'a mut self, max_errors: u32) -> &'a mut Self {
-        self.max_errors = max_errors;
-        self
-    }
-
-    pub fn pad_byte<'a>(&'a mut self, pad_byte: u8) -> &'a mut Self {
-        self.pad_byte = pad_byte;
-        self
     }
 
     pub fn send<D: Read + Write, R: Read>(&mut self, dev: &mut D, stream: &mut R) -> Result<()> {
