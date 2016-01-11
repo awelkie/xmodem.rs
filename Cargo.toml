@@ -1,6 +1,6 @@
 [package]
 name = "xmodem"
-version = "0.1.1"
+version = "0.1.2"
 authors = ["Allen Welkie <allen.welkie@gmail.com>"]
 keywords = ["xmodem", "ymodem", "zmodem", "serial"]
 repository = "https://github.com/awelkie/xmodem.rs"
