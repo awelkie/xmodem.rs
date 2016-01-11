@@ -4,7 +4,7 @@ version = "0.1.0"
 authors = ["Allen Welkie <allen.welkie@gmail.com>"]
 keywords = ["xmodem", "ymodem", "zmodem", "serial"]
 license = "MIT"
-description "An implementation of the XMODEM file-transfer protocol."
+description = "An implementation of the XMODEM file-transfer protocol."
 
 [dependencies]
 log = "^0.3"
