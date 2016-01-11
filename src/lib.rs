@@ -141,11 +141,11 @@ impl Xmodem {
 
             match self.checksum_mode {
                 Checksum::Standard => {
-                    let checksum = calc_checksum(&buff);
+                    let checksum = calc_checksum(&buff[3..]);
                     buff.push(checksum);
                 },
                 Checksum::CRC16 => {
-                    let crc = calc_crc(&buff);
+                    let crc = calc_crc(&buff[3..]);
                     buff.push(((crc >> 8) & 0xFF) as u8);
                     buff.push((crc & 0xFF) as u8);
                 }
