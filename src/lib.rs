@@ -22,7 +22,12 @@ pub type Result<T> = std::result::Result<T, Error>;
 #[derive(Debug)]
 pub enum Error {
     Io(io::Error),
+
+    /// The number of communications errors exceeded `max_errors` in a single
+    /// transmission.
     ExhaustedRetries,
+
+    /// The transmission was canceled by the other end of the channel.
     Canceled,
 }
 
@@ -44,16 +49,27 @@ pub enum BlockLength {
     OneK = 1024,
 }
 
+/// Configuration for the XMODEM transfer.
 #[derive(Copy, Clone, Debug)]
 pub struct Xmodem {
+    /// The number of errors that can occur before the communication is
+    /// considered a failure. Errors include unexpected bytes and timeouts waiting for bytes.
     pub max_errors: u32,
+
+    /// The byte used to pad the last block. XMODEM can only send blocks of a certain size,
+    /// so if the message is not a multiple of that size the last block needs to be padded.
     pub pad_byte: u8,
+
+    /// The length of each block. There are only two options: 128-byte blocks (standard
+    ///  XMODEM) or 1024-byte blocks (XMODEM-1k).
     pub block_length: BlockLength,
+
     checksum_mode: Checksum,
     errors: u32,
 }
 
 impl Xmodem {
+    /// Creates the XMODEM config with default parameters.
     pub fn new() -> Self {
         Xmodem {
             max_errors: 16,
@@ -64,6 +80,16 @@ impl Xmodem {
         }
     }
 
+    /// Starts the XMODEM transmission.
+    ///
+    /// `dev` should be the serial communication channel (e.g. the serial device).
+    /// `stream` should be the message to send (e.g. a file).
+    ///
+    /// # Timeouts
+    /// This method has no way of setting the timeout of `dev`, so it's up to the caller
+    /// to set the timeout of the device before calling this method. Timeouts on receiving
+    /// bytes will be counted against `max_errors`, but timeouts on transmitting bytes
+    /// will be considered a fatal error.
     pub fn send<D: Read + Write, R: Read>(&mut self, dev: &mut D, stream: &mut R) -> Result<()> {
         self.errors = 0;
 
@@ -77,7 +103,7 @@ impl Xmodem {
         Ok(())
     }
 
-    pub fn start_send<D: Read + Write>(&mut self, dev: &mut D) -> Result<()> {
+    fn start_send<D: Read + Write>(&mut self, dev: &mut D) -> Result<()> {
         let mut cancels = 0u32;
         loop {
             match try!(get_byte_timeout(dev)) {

@@ -75,7 +75,7 @@ fn xmodem_send_crc() {
                        .arg(recv_file.path())
                        .stdin(Stdio::piped())
                        .stdout(Stdio::piped())
-                       //.stderr(Stdio::null())
+                       .stderr(Stdio::null())
                        .spawn().unwrap();
 
     let tx_stream = recv.stdin.unwrap();
