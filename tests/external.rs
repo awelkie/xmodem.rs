@@ -38,7 +38,7 @@ fn xmodem_recv(checksum_mode:Checksum) {
     thread_rng().fill_bytes(&mut data);
 
     let mut send_file = NamedTempFile::new().unwrap();
-    send_file.write_all(&data);
+    send_file.write_all(&data).unwrap();
 
     let send = Command::new("sb")
         .arg("--xmodem")
@@ -53,12 +53,11 @@ fn xmodem_recv(checksum_mode:Checksum) {
     let mut serial_dev = ChildStdInOut { stdin: tx_stream, stdout: rx_stream };
 
     let mut xmodem = Xmodem::new();
-    xmodem.checksum_mode = checksum_mode;
     let mut recv_data = Vec::new();
-    xmodem.recv(&mut serial_dev,&mut recv_data).unwrap();
+    xmodem.recv(&mut serial_dev,&mut recv_data, checksum_mode).unwrap();
 
     let mut sent_data = Vec::new();
-    send_file.seek(std::io::SeekFrom::Start(0));
+    send_file.seek(std::io::SeekFrom::Start(0)).unwrap();
     send_file.read_to_end(&mut sent_data).unwrap();
     let mut padded_data = sent_data.clone();
     for _ in 0..(128 - sent_data.len() % 128) {
