@@ -38,7 +38,7 @@ impl From<io::Error> for Error {
 }
 
 #[derive(Copy, Clone, Debug)]
-enum Checksum {
+pub enum Checksum {
     Standard,
     CRC16,
 }
@@ -64,6 +64,7 @@ pub struct Xmodem {
     ///  XMODEM) or 1024-byte blocks (XMODEM-1k).
     pub block_length: BlockLength,
 
+    /// The checksum mode used by XMODEM. This is determined by the receiver.
     checksum_mode: Checksum,
     errors: u32,
 }
@@ -103,24 +104,50 @@ impl Xmodem {
         Ok(())
     }
 
+    /// Receive an XMODEM transmission.
     ///
-    pub fn recv<D: Read + Write, W: Write>(&mut self, dev: &mut D, outstream: &mut W) -> Result<()> {
+    /// `dev` should be the serial communication channel (e.g. the serial device).
+    /// The received data will be written to `outstream`.
+    /// `checksum` indicates which checksum mode should be used; Checksum::Standard is
+    /// a reasonable default.
+    ///
+    /// # Timeouts
+    /// This method has no way of setting the timeout of `dev`, so it's up to the caller
+    /// to set the timeout of the device before calling this method. Timeouts on receiving
+    /// bytes will be counted against `max_errors`, but timeouts on transmitting bytes
+    /// will be considered a fatal error.
+    pub fn recv<D: Read + Write, W: Write>(&mut self,
+                                           dev: &mut D,
+                                           outstream: &mut W,
+                                           checksum : Checksum) -> Result<()> {
         self.errors = 0;
+        self.checksum_mode = checksum;
         debug!("Starting XMODEM receive");
-        try!(dev.write(&[NAK]));
+        try!(dev.write(&[match self.checksum_mode {
+            Checksum::Standard => NAK,
+            Checksum::CRC16 => CRC }]));
         debug!("NCG sent. Receiving stream.");
-
         let mut packet_num : u8 = 1;
         loop {
             match try!(get_byte_timeout(dev)) {
-                Some(SOH) => { // new packet
-                    let pnum = try!(get_byte(dev));
-                    let pnum_1c = try!(get_byte(dev));
-                    let mut cancel_packet = packet_num != pnum ||  (255-pnum) != pnum_1c;
+                Some(SOH) => { // Handle next packet
+                    let pnum = try!(get_byte(dev)); // specified packet number
+                    let pnum_1c = try!(get_byte(dev)); // same, 1's complemented
+                    // We'll respond with cancel later if the packet number is wrong
+                    let cancel_packet = packet_num != pnum ||  (255-pnum) != pnum_1c;
                     let mut data : [u8; 128] = [0; 128];
                     try!(dev.read_exact(&mut data));
-                    let recv_checksum = try!(get_byte(dev));
-                    let success = calc_checksum(&data) == recv_checksum;
+                    let success = match self.checksum_mode {
+                        Checksum::Standard => {
+                            let recv_checksum = try!(get_byte(dev));
+                            calc_checksum(&data) == recv_checksum },
+                        Checksum::CRC16 => {
+                            let recv_checksum =
+                                ( (try!(get_byte(dev)) as u16) << 8) +
+                                try!(get_byte(dev)) as u16;
+                            calc_crc(&data) == recv_checksum },
+                    };
+
                     if cancel_packet {
                         try!(dev.write(&[CAN]));
                             try!(dev.write(&[CAN]));
