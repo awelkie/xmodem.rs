@@ -103,6 +103,55 @@ impl Xmodem {
         Ok(())
     }
 
+    ///
+    pub fn recv<D: Read + Write, W: Write>(&mut self, dev: &mut D, outstream: &mut W) -> Result<()> {
+        self.errors = 0;
+        debug!("Starting XMODEM receive");
+        try!(dev.write(&[NAK]));
+        debug!("NCG sent. Receiving stream.");
+
+        let mut packet_num : u8 = 1;
+        loop {
+            match try!(get_byte_timeout(dev)) {
+                Some(SOH) => { // new packet
+                    let pnum = try!(get_byte(dev));
+                    let pnum_1c = try!(get_byte(dev));
+                    let mut cancel_packet = packet_num != pnum ||  (255-pnum) != pnum_1c;
+                    let mut data : [u8; 128] = [0; 128];
+                    try!(dev.read_exact(&mut data));
+                    let recv_checksum = try!(get_byte(dev));
+                    let success = calc_checksum(&data) == recv_checksum;
+                    if cancel_packet {
+                        try!(dev.write(&[CAN]));
+                            try!(dev.write(&[CAN]));
+                        return Err(Error::Canceled)
+                    }
+                    if success {
+                        packet_num += 1;
+                        try!(dev.write(&[ACK]));
+                        try!(outstream.write_all(&data));
+                    } else {
+                        try!(dev.write(&[NAK]));
+                        self.errors += 1;
+                    }
+                },
+                Some(EOT) => { // End of file
+                    try!(dev.write(&[NAK]));
+                    match try!(get_byte_timeout(dev)) {
+                        Some(SOH) => { try!(dev.write(&[ACK])); },
+                        _ => (),
+                    }
+                    break
+                },
+                Some(_) => {
+                    warn!("Unrecognized symbol!");
+                },
+                None => warn!("Timeout!"),
+            }
+        }
+        Ok(())
+    }
+          
     fn start_send<D: Read + Write>(&mut self, dev: &mut D) -> Result<()> {
         let mut cancels = 0u32;
         loop {

@@ -5,7 +5,7 @@ extern crate rand;
 extern crate xmodem;
 
 use std::process::{Command, Stdio, ChildStdin, ChildStdout};
-use std::io::{self, Read, Write};
+use std::io::{self, Read, Write, Seek};
 use tempfile::NamedTempFile;
 use rand::{Rng, thread_rng};
 use xmodem::Xmodem;
@@ -29,6 +29,41 @@ impl Write for ChildStdInOut {
     fn flush(&mut self) -> io::Result<()> {
         self.stdin.flush()
     }
+}
+
+#[test]
+fn xmodem_recv_standard() {
+    let data_len = 2000;
+    let mut data = vec![0; data_len];
+    thread_rng().fill_bytes(&mut data);
+
+    let mut send_file = NamedTempFile::new().unwrap();
+    send_file.write_all(&data);
+
+    let send = Command::new("sb")
+        .arg("--xmodem")
+        .arg(send_file.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn().unwrap();
+    
+    let tx_stream = send.stdin.unwrap();
+    let rx_stream = send.stdout.unwrap();
+    let mut serial_dev = ChildStdInOut { stdin: tx_stream, stdout: rx_stream };
+
+    let mut xmodem = Xmodem::new();
+    let mut recv_data = Vec::new();
+    xmodem.recv(&mut serial_dev,&mut recv_data).unwrap();
+
+    let mut sent_data = Vec::new();
+    send_file.seek(std::io::SeekFrom::Start(0));
+    send_file.read_to_end(&mut sent_data).unwrap();
+    let mut padded_data = sent_data.clone();
+    for _ in 0..(128 - data.len() % 128) {
+         padded_data.push(0x1a);
+    }
+    assert_eq!(sent_data, recv_data);
 }
 
 #[test]
