@@ -116,10 +116,7 @@ fn xmodem_loopback(checksum_mode:Checksum) {
         xmodem.recv(&mut p2, &mut data_in, checksum_mode).unwrap();
     });
     
-    match handle.join() {
-        Ok(()) => (),
-        Err(e) => println!("{:?}",e),
-    }
+    handle.join().unwrap();
     handle2.join().unwrap();
 }
 
