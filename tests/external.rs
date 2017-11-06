@@ -66,8 +66,7 @@ fn loopback() -> (BidirectionalPipe, BidirectionalPipe) {
 }
 
 #[cfg(test)]
-fn xmodem_recv(checksum_mode:Checksum) {
-    let data_len = 2000;
+fn xmodem_recv(checksum_mode : Checksum,data_len : usize) {
     let mut data = vec![0; data_len];
     thread_rng().fill_bytes(&mut data);
 
@@ -144,12 +143,17 @@ fn xmodem_loopback_long_crc() {
 
 #[test]
 fn xmodem_recv_standard() {
-    xmodem_recv(Checksum::Standard);
+    xmodem_recv(Checksum::Standard,2000);
 }
 
 #[test]
 fn xmodem_recv_crc() {
-    xmodem_recv(Checksum::CRC16);
+    xmodem_recv(Checksum::CRC16,2000);
+}
+
+#[test]
+fn xmodem_recv_long() {
+    xmodem_recv(Checksum::CRC16,50000);
 }
 
 #[test]
