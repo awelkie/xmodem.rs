@@ -101,28 +101,45 @@ fn xmodem_recv(checksum_mode:Checksum) {
 }
 
 #[cfg(test)]
-fn xmodem_loopback(checksum_mode:Checksum) {
-    let data_len=51200;
+fn xmodem_loopback(checksum_mode:Checksum, data_len : usize) {
     let mut data_out = vec![0; data_len];
-    thread_rng().fill_bytes(&mut data_out);
-    let mut data_in = vec![0; data_len];
+    // We don't really need the rng here
+    for idx in 0..data_len { data_out[idx] = ((idx+7) * 13) as u8; }
     let (mut p1, mut p2) = loopback();
     let handle = std::thread::spawn(move || {
         let mut xmodem = Xmodem::new();
         xmodem.send(&mut p1, &mut &data_out[..]).unwrap();
+        data_out
     });
     let handle2 = std::thread::spawn(move || {
         let mut xmodem = Xmodem::new();
+        let mut data_in= vec![0; 0];
         xmodem.recv(&mut p2, &mut data_in, checksum_mode).unwrap();
+        data_in
     });
     
-    handle.join().unwrap();
-    handle2.join().unwrap();
+    let mut dato = handle.join().unwrap();
+    // Pad output data to multiple of 128 for comparison
+    for _ in 0..(128 - data_len % 128) { dato.push(0x1a); }
+    let dati = handle2.join().unwrap();
+    assert_eq!(dato.len(),dati.len());
+    assert_eq!(dato,dati);
 }
 
 #[test]
 fn xmodem_loopback_standard() {
-    xmodem_loopback(Checksum::Standard);
+    xmodem_loopback(Checksum::Standard,2000);
+}
+
+#[test]
+fn xmodem_loopback_crc() {
+    xmodem_loopback(Checksum::CRC16,2000);
+}
+
+#[test]
+fn xmodem_loopback_long_crc() {
+    // make sure we wrap block counter
+    xmodem_loopback(Checksum::CRC16,50000);
 }
 
 #[test]
