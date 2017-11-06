@@ -169,7 +169,11 @@ impl Xmodem {
                 Some(_) => {
                     warn!("Unrecognized symbol!");
                 },
-                None => warn!("Timeout!"),
+                None => { self.errors += 1; warn!("Timeout!") },
+            }
+            if self.errors >= self.max_errors {
+                error!("Exhausted max retries ({}) while waiting for ACK for EOT", self.max_errors);
+                return Err(Error::ExhaustedRetries);
             }
         }
         Ok(())
