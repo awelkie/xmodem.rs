@@ -154,7 +154,7 @@ impl Xmodem {
                         return Err(Error::Canceled)
                     }
                     if success {
-                        packet_num += 1;
+                        packet_num = packet_num.wrapping_add(1);
                         try!(dev.write(&[ACK]));
                         try!(outstream.write_all(&data));
                     } else {
