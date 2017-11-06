@@ -163,11 +163,7 @@ impl Xmodem {
                     }
                 },
                 Some(EOT) => { // End of file
-                    try!(dev.write(&[NAK]));
-                    match try!(get_byte_timeout(dev)) {
-                        Some(SOH) => { try!(dev.write(&[ACK])); },
-                        _ => (),
-                    }
+                    try!(dev.write(&[ACK]));
                     break
                 },
                 Some(_) => {
