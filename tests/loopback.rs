@@ -4,7 +4,7 @@ extern crate rand;
 extern crate xmodem;
 
 use std::io::{self, Read, Write, ErrorKind};
-use xmodem::{Xmodem,Checksum};
+use xmodem::{Xmodem,Checksum,BlockLength};
 use std::sync::mpsc::{channel,Sender,Receiver};
 
 struct BidirectionalPipe {
@@ -42,13 +42,14 @@ fn loopback() -> (BidirectionalPipe, BidirectionalPipe) {
 }
 
 #[cfg(test)]
-fn xmodem_loopback(checksum_mode:Checksum, data_len : usize) {
+fn xmodem_loopback(checksum_mode:Checksum,block_length:BlockLength, data_len : usize) {
     let mut data_out = vec![0; data_len];
     // We don't really need the rng here
     for idx in 0..data_len { data_out[idx] = ((idx+7) * 13) as u8; }
     let (mut p1, mut p2) = loopback();
     let handle = std::thread::spawn(move || {
         let mut xmodem = Xmodem::new();
+        xmodem.block_length = block_length;
         xmodem.send(&mut p1, &mut &data_out[..]).unwrap();
         data_out
     });
@@ -60,8 +61,9 @@ fn xmodem_loopback(checksum_mode:Checksum, data_len : usize) {
     });
     
     let mut dato = handle.join().unwrap();
-    // Pad output data to multiple of 128 for comparison
-    for _ in 0..(128 - data_len % 128) { dato.push(0x1a); }
+    // Pad output data to multiple of block length for comparison
+    let bl = block_length as usize;
+    for _ in 0..(bl - data_len % bl) { dato.push(0x1a); }
     let dati = handle2.join().unwrap();
     assert_eq!(dato.len(),dati.len());
     assert_eq!(dato,dati);
@@ -69,16 +71,21 @@ fn xmodem_loopback(checksum_mode:Checksum, data_len : usize) {
 
 #[test]
 fn xmodem_loopback_standard() {
-    xmodem_loopback(Checksum::Standard,2000);
+    xmodem_loopback(Checksum::Standard,BlockLength::Standard,2000);
+}
+
+#[test]
+fn xmodem_loopback_onek() {
+    xmodem_loopback(Checksum::Standard,BlockLength::OneK,2200);
 }
 
 #[test]
 fn xmodem_loopback_crc() {
-    xmodem_loopback(Checksum::CRC16,2000);
+    xmodem_loopback(Checksum::CRC16,BlockLength::Standard,2000);
 }
 
 #[test]
 fn xmodem_loopback_long_crc() {
     // make sure we wrap block counter
-    xmodem_loopback(Checksum::CRC16,50000);
+    xmodem_loopback(Checksum::CRC16,BlockLength::Standard,50000);
 }

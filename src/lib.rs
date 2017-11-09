@@ -130,12 +130,18 @@ impl Xmodem {
         let mut packet_num : u8 = 1;
         loop {
             match try!(get_byte_timeout(dev)) {
-                Some(SOH) => { // Handle next packet
+                bt @ Some(SOH) | bt @ Some(STX) => { // Handle next packet
+                    let packet_size = match bt {
+                        Some(SOH) => 128,
+                        Some(STX) => 1024,
+                        _ => 0, // Why does the compiler need this?
+                    };
                     let pnum = try!(get_byte(dev)); // specified packet number
                     let pnum_1c = try!(get_byte(dev)); // same, 1's complemented
                     // We'll respond with cancel later if the packet number is wrong
                     let cancel_packet = packet_num != pnum ||  (255-pnum) != pnum_1c;
-                    let mut data : [u8; 128] = [0; 128];
+                    let mut data : Vec<u8> = Vec::new();
+                    data.resize(packet_size,0);
                     try!(dev.read_exact(&mut data));
                     let success = match self.checksum_mode {
                         Checksum::Standard => {
