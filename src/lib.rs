@@ -38,7 +38,7 @@ impl From<io::Error> for Error {
 }
 
 #[derive(Copy, Clone, Debug)]
-enum Checksum {
+pub enum Checksum {
     Standard,
     CRC16,
 }
@@ -64,6 +64,7 @@ pub struct Xmodem {
     ///  XMODEM) or 1024-byte blocks (XMODEM-1k).
     pub block_length: BlockLength,
 
+    /// The checksum mode used by XMODEM. This is determined by the receiver.
     checksum_mode: Checksum,
     errors: u32,
 }
@@ -103,6 +104,87 @@ impl Xmodem {
         Ok(())
     }
 
+    /// Receive an XMODEM transmission.
+    ///
+    /// `dev` should be the serial communication channel (e.g. the serial device).
+    /// The received data will be written to `outstream`.
+    /// `checksum` indicates which checksum mode should be used; Checksum::Standard is
+    /// a reasonable default.
+    ///
+    /// # Timeouts
+    /// This method has no way of setting the timeout of `dev`, so it's up to the caller
+    /// to set the timeout of the device before calling this method. Timeouts on receiving
+    /// bytes will be counted against `max_errors`, but timeouts on transmitting bytes
+    /// will be considered a fatal error.
+    pub fn recv<D: Read + Write, W: Write>(&mut self,
+                                           dev: &mut D,
+                                           outstream: &mut W,
+                                           checksum : Checksum) -> Result<()> {
+        self.errors = 0;
+        self.checksum_mode = checksum;
+        debug!("Starting XMODEM receive");
+        try!(dev.write(&[match self.checksum_mode {
+            Checksum::Standard => NAK,
+            Checksum::CRC16 => CRC }]));
+        debug!("NCG sent. Receiving stream.");
+        let mut packet_num : u8 = 1;
+        loop {
+            match try!(get_byte_timeout(dev)) {
+                bt @ Some(SOH) | bt @ Some(STX) => { // Handle next packet
+                    let packet_size = match bt {
+                        Some(SOH) => 128,
+                        Some(STX) => 1024,
+                        _ => 0, // Why does the compiler need this?
+                    };
+                    let pnum = try!(get_byte(dev)); // specified packet number
+                    let pnum_1c = try!(get_byte(dev)); // same, 1's complemented
+                    // We'll respond with cancel later if the packet number is wrong
+                    let cancel_packet = packet_num != pnum ||  (255-pnum) != pnum_1c;
+                    let mut data : Vec<u8> = Vec::new();
+                    data.resize(packet_size,0);
+                    try!(dev.read_exact(&mut data));
+                    let success = match self.checksum_mode {
+                        Checksum::Standard => {
+                            let recv_checksum = try!(get_byte(dev));
+                            calc_checksum(&data) == recv_checksum },
+                        Checksum::CRC16 => {
+                            let recv_checksum =
+                                ( (try!(get_byte(dev)) as u16) << 8) +
+                                try!(get_byte(dev)) as u16;
+                            calc_crc(&data) == recv_checksum },
+                    };
+
+                    if cancel_packet {
+                        try!(dev.write(&[CAN]));
+                            try!(dev.write(&[CAN]));
+                        return Err(Error::Canceled)
+                    }
+                    if success {
+                        packet_num = packet_num.wrapping_add(1);
+                        try!(dev.write(&[ACK]));
+                        try!(outstream.write_all(&data));
+                    } else {
+                        try!(dev.write(&[NAK]));
+                        self.errors += 1;
+                    }
+                },
+                Some(EOT) => { // End of file
+                    try!(dev.write(&[ACK]));
+                    break
+                },
+                Some(_) => {
+                    warn!("Unrecognized symbol!");
+                },
+                None => { self.errors += 1; warn!("Timeout!") },
+            }
+            if self.errors >= self.max_errors {
+                error!("Exhausted max retries ({}) while waiting for ACK for EOT", self.max_errors);
+                return Err(Error::ExhaustedRetries);
+            }
+        }
+        Ok(())
+    }
+          
     fn start_send<D: Read + Write>(&mut self, dev: &mut D) -> Result<()> {
         let mut cancels = 0u32;
         loop {
