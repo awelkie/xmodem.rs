@@ -116,7 +116,7 @@ impl Xmodem {
     /// to set the timeout of the device before calling this method. Timeouts on receiving
     /// bytes will be counted against `max_errors`, but timeouts on transmitting bytes
     /// will be considered a fatal error.
-    pub fn recv<D: Read + Write, W: Write>(&mut self,
+    pub fn recv<D: Read + Write, W: Write + ?Sized>(&mut self,
                                            dev: &mut D,
                                            outstream: &mut W,
                                            checksum : Checksum) -> Result<()> {
