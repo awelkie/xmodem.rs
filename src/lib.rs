@@ -122,60 +122,84 @@ impl Xmodem {
                                            checksum : Checksum) -> Result<()> {
         self.errors = 0;
         self.checksum_mode = checksum;
-        debug!("Starting XMODEM receive");
-        try!(dev.write(&[match self.checksum_mode {
+        let ncg = match self.checksum_mode {
             Checksum::Standard => NAK,
-            Checksum::CRC16 => CRC }]));
+            Checksum::CRC16 => CRC };
+        debug!("Starting XMODEM receive");
+        try!(dev.write(&[ncg]));
         debug!("NCG sent. Receiving stream.");
         let mut packet_num : u8 = 1;
         loop {
             match try!(get_byte_timeout(dev)) {
                 bt @ Some(SOH) | bt @ Some(STX) => { // Handle next packet
-                    let packet_size = match bt {
+                    let data_size = match bt {
                         Some(SOH) => 128,
                         Some(STX) => 1024,
                         _ => 0, // Why does the compiler need this?
                     };
-                    let pnum = try!(get_byte(dev)); // specified packet number
-                    let pnum_1c = try!(get_byte(dev)); // same, 1's complemented
-                    // We'll respond with cancel later if the packet number is wrong
-                    let cancel_packet = packet_num != pnum ||  (255-pnum) != pnum_1c;
                     let mut data : Vec<u8> = Vec::new();
+                    let packet_size = data_size
+                        + 2
+                        + match self.checksum_mode {
+                            Checksum::Standard => 1,
+                            Checksum::CRC16 => 2,
+                        };
                     data.resize(packet_size,0);
-                    try!(dev.read_exact(&mut data));
-                    let success = match self.checksum_mode {
-                        Checksum::Standard => {
-                            let recv_checksum = try!(get_byte(dev));
-                            calc_checksum(&data) == recv_checksum },
-                        Checksum::CRC16 => {
-                            let recv_checksum =
-                                ( (try!(get_byte(dev)) as u16) << 8) +
-                                try!(get_byte(dev)) as u16;
-                            calc_crc(&data) == recv_checksum },
-                    };
-
-                    if cancel_packet {
-                        try!(dev.write(&[CAN]));
-                            try!(dev.write(&[CAN]));
-                        return Err(Error::Canceled)
-                    }
-                    if success {
-                        packet_num = packet_num.wrapping_add(1);
-                        try!(dev.write(&[ACK]));
-                        try!(outstream.write_all(&data));
-                    } else {
-                        try!(dev.write(&[NAK]));
-                        self.errors += 1;
+                    match dev.read_exact(&mut data) {
+                        Ok(_) => {
+                            // Check packet number
+                            let pnum = data[0];
+                            let pnum_1c = data[1];
+                            if (packet_num != pnum) || (255-pnum != pnum_1c) {
+                                // We've lost data; cancel this transmission
+                                warn!("Cancelling transmission.");
+                                try!(dev.write(&[CAN]));
+                                try!(dev.write(&[CAN]));
+                                return Err(Error::Canceled)
+                            }
+                            // Check checksum
+                            let check_ok = match self.checksum_mode {
+                                Checksum::Standard => {
+                                    let recv_checksum = data[packet_size-1];
+                                    calc_checksum(&data[2..packet_size-1]) == recv_checksum },
+                                Checksum::CRC16 => {
+                                    let recv_checksum =
+                                        ((data[packet_size-2] as u16) << 8) +
+                                        (data[packet_size-1] as u16);
+                                    calc_crc(&data[2..packet_size-2]) == recv_checksum },
+                            };
+                            // Response
+                            if check_ok {
+                                packet_num = packet_num.wrapping_add(1);
+                                try!(dev.write(&[ACK]));
+                                try!(outstream.write_all(&data[2..data_size+2]));
+                            } else {
+                                info!("Packet failed.");
+                                try!(dev.write(&[NAK]));
+                                self.errors += 1;
+                            }
+                        },
+                        Err(e) => {
+                            error!("Error is {}",e);
+                            // Timeout
+                            self.errors += 1;
+                            warn!("Timeout in packet! Resending NAK.");
+                            try!(dev.write(&[NAK]));
+                        },
                     }
                 },
                 Some(EOT) => { // End of file
                     try!(dev.write(&[ACK]));
                     break
                 },
-                Some(_) => {
-                    warn!("Unrecognized symbol!");
+                Some(x) => {
+                    warn!("Unrecognized symbol {:X}!",x);
                 },
-                None => { self.errors += 1; warn!("Timeout!") },
+                None => {
+                    self.errors += 1;
+                    warn!("Timeout! Resending NAK.");
+                    try!(dev.write(&[NAK]));
+                },
             }
             if self.errors >= self.max_errors {
                 error!("Exhausted max retries ({}) while waiting for ACK for EOT", self.max_errors);
