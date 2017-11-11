@@ -7,12 +7,12 @@ use std::io::{self, Read, Write, ErrorKind};
 use xmodem::{Xmodem,Checksum,BlockLength};
 use std::sync::mpsc::{channel,Sender,Receiver};
 
-struct BidirectionalPipe {
+struct Pipe {
     pin : Receiver<u8>,
     pout : Sender<u8>,
 }
 
-impl Read for BidirectionalPipe {
+impl Read for Pipe {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         for idx in 0..buf.len() {
             buf[idx] = match self.pin.recv() {
@@ -24,7 +24,7 @@ impl Read for BidirectionalPipe {
     }
 }
 
-impl Write for BidirectionalPipe {
+impl Write for Pipe {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         for v in buf { self.pout.send(*v).unwrap(); }
         Ok(buf.len())
@@ -35,10 +35,10 @@ impl Write for BidirectionalPipe {
     }
 }
 
-fn loopback() -> (BidirectionalPipe, BidirectionalPipe) {
+fn loopback() -> (Pipe, Pipe) {
     let (s1,r1) = channel();
     let (s2,r2) = channel();
-    (BidirectionalPipe{ pin : r1, pout : s2 }, BidirectionalPipe{ pin : r2, pout : s1 })
+    (Pipe{ pin : r1, pout : s2 }, Pipe{ pin : r2, pout : s1 })
 }
 
 #[cfg(test)]
