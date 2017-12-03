@@ -6,13 +6,14 @@ extern crate xmodem;
 use std::io::{self, Read, Write, ErrorKind};
 use xmodem::{Xmodem,Checksum,BlockLength};
 use std::sync::mpsc::{channel,Sender,Receiver};
+use rand::{Rng, thread_rng};
 
-struct BidirectionalPipe {
+struct Pipe {
     pin : Receiver<u8>,
     pout : Sender<u8>,
 }
 
-impl Read for BidirectionalPipe {
+impl Read for Pipe {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         for idx in 0..buf.len() {
             buf[idx] = match self.pin.recv() {
@@ -24,7 +25,7 @@ impl Read for BidirectionalPipe {
     }
 }
 
-impl Write for BidirectionalPipe {
+impl Write for Pipe {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         for v in buf { self.pout.send(*v).unwrap(); }
         Ok(buf.len())
@@ -35,10 +36,10 @@ impl Write for BidirectionalPipe {
     }
 }
 
-fn loopback() -> (BidirectionalPipe, BidirectionalPipe) {
+fn loopback() -> (Pipe, Pipe) {
     let (s1,r1) = channel();
     let (s2,r2) = channel();
-    (BidirectionalPipe{ pin : r1, pout : s2 }, BidirectionalPipe{ pin : r2, pout : s1 })
+    (Pipe{ pin : r1, pout : s2 }, Pipe{ pin : r2, pout : s1 })
 }
 
 #[cfg(test)]
@@ -88,4 +89,35 @@ fn xmodem_loopback_crc() {
 fn xmodem_loopback_long_crc() {
     // make sure we wrap block counter
     xmodem_loopback(Checksum::CRC16,BlockLength::Standard,50000);
+}
+
+#[test]
+fn xmodem_initial_noise_test() {
+    let data_len = 2000;
+    let mut data_out = vec![0; data_len];
+    // We don't really need the rng here
+    for idx in 0..data_len { data_out[idx] = ((idx+7) * 13) as u8; }
+    let (mut p1, mut p2) = loopback();
+    let handle = std::thread::spawn(move || {
+        let mut xmodem = Xmodem::new();
+        let mut noise = vec![0; 10];
+        thread_rng().fill_bytes(&mut noise);
+        p1.write(&noise).unwrap();
+        xmodem.send(&mut p1, &mut &data_out[..]).unwrap();
+        data_out
+    });
+    let handle2 = std::thread::spawn(move || {
+        let mut xmodem = Xmodem::new();
+        let mut data_in= vec![0; 0];
+        xmodem.recv(&mut p2, &mut data_in, Checksum::Standard).unwrap();
+        data_in
+    });
+    
+    let mut dato = handle.join().unwrap();
+    // Pad output data to multiple of block length for comparison
+    let bl = 128;
+    for _ in 0..(bl - data_len % bl) { dato.push(0x1a); }
+    let dati = handle2.join().unwrap();
+    assert_eq!(dato.len(),dati.len());
+    assert_eq!(dato,dati);
 }
