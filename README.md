@@ -8,6 +8,3 @@ The XMODEM protocol in Rust
 
 # Testing
 The tests require the binaries found in the `lrzsz` package.
-
-# Rust channels
-Currently only the beta and nightly channels are supported (stable support is waiting on [#27585](https://github.com/rust-lang/rust/issues/27585))
