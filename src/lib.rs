@@ -67,6 +67,9 @@ pub struct Xmodem {
     /// The checksum mode used by XMODEM. This is determined by the receiver.
     checksum_mode: Checksum,
     errors: u32,
+
+    /// The callback called after every successful packet transfer. Parameter is the transferred packets number
+    packet_callback: Option<fn(u32)>
 }
 
 impl Xmodem {
@@ -78,7 +81,12 @@ impl Xmodem {
             block_length: BlockLength::Standard,
             checksum_mode: Checksum::Standard,
             errors: 0,
+            packet_callback: None
         }
+    }
+
+    pub fn builder() -> XmodemBuilder {
+        XmodemBuilder { xmodem: Xmodem::new() }
     }
 
     /// Starts the XMODEM transmission.
@@ -127,7 +135,7 @@ impl Xmodem {
             Checksum::Standard => NAK,
             Checksum::CRC16 => CRC }])?;
         debug!("NCG sent. Receiving stream.");
-        let mut packet_num : u8 = 1;
+        let mut packet_num : u32 = 1;
         loop {
             match get_byte_timeout(dev)? {
                 bt @ Some(SOH) | bt @ Some(STX) => { // Handle next packet
@@ -139,7 +147,7 @@ impl Xmodem {
                     let pnum = get_byte(dev)?; // specified packet number
                     let pnum_1c = get_byte(dev)?; // same, 1's complemented
                     // We'll respond with cancel later if the packet number is wrong
-                    let cancel_packet = packet_num != pnum ||  (255-pnum) != pnum_1c;
+                    let cancel_packet = packet_num as u8 != pnum ||  (255-pnum) != pnum_1c;
                     let mut data : Vec<u8> = Vec::new();
                     data.resize(packet_size,0);
                     dev.read_exact(&mut data)?;
@@ -163,6 +171,9 @@ impl Xmodem {
                         packet_num = packet_num.wrapping_add(1);
                         dev.write(&[ACK])?;
                         outstream.write_all(&data)?;
+                        if let Some(callback) = self.packet_callback {
+                            (callback)(packet_num)
+                        }
                     } else {
                         dev.write(&[NAK])?;
                         self.errors += 1;
@@ -266,6 +277,9 @@ impl Xmodem {
                 Some(c) => {
                     if c == ACK {
                         debug!("Received ACK for block {}", block_num);
+                        if let Some(callback) = self.packet_callback {
+                            (callback)(block_num);
+                        }
                         continue
                     } else {
                         warn!("Expected ACK, got {}", c);
@@ -308,6 +322,36 @@ impl Xmodem {
                 return Err(Error::ExhaustedRetries);
             }
         }
+    }
+}
+
+pub struct XmodemBuilder {
+    xmodem: Xmodem
+}
+
+impl XmodemBuilder {
+    pub fn max_errors(&mut self, val: u32) -> &Self {
+        self.xmodem.max_errors = val;
+        self
+    }
+
+    pub fn pad_byte(&mut self, val: u8) -> &Self {
+        self.xmodem.pad_byte = val;
+        self
+    }
+
+    pub fn block_length(&mut self, val: BlockLength) -> &Self {
+        self.xmodem.block_length = val;
+        self
+    }
+
+    pub fn packet_callback(&mut self, callback: fn(u32)) -> &Self {
+        self.xmodem.packet_callback = Some(callback);
+        self
+    }
+
+    pub fn build(&self) -> Xmodem {
+        self.xmodem
     }
 }
 
