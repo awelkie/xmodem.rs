@@ -67,6 +67,9 @@ pub struct Xmodem {
     /// The checksum mode used by XMODEM. This is determined by the receiver.
     checksum_mode: Checksum,
     errors: u32,
+
+    /// The callback called after every successful packet transfer. Parameter is the transferred packets number
+    packet_callback: Option<fn(u32)>
 }
 
 impl Xmodem {
@@ -78,7 +81,12 @@ impl Xmodem {
             block_length: BlockLength::Standard,
             checksum_mode: Checksum::Standard,
             errors: 0,
+            packet_callback: None
         }
+    }
+
+    pub fn builder() -> XmodemBuilder {
+        XmodemBuilder { xmodem: Xmodem::new() }
     }
 
     /// Starts the XMODEM transmission.
@@ -95,11 +103,11 @@ impl Xmodem {
         self.errors = 0;
 
         debug!("Starting XMODEM transfer");
-        try!(self.start_send(dev));
+        self.start_send(dev)?;
         debug!("First byte received. Sending stream.");
-        try!(self.send_stream(dev, stream));
+        self.send_stream(dev, stream)?;
         debug!("Sending EOT");
-        try!(self.finish_send(dev));
+        self.finish_send(dev)?;
 
         Ok(())
     }
@@ -123,53 +131,56 @@ impl Xmodem {
         self.errors = 0;
         self.checksum_mode = checksum;
         debug!("Starting XMODEM receive");
-        try!(dev.write(&[match self.checksum_mode {
+        dev.write(&[match self.checksum_mode {
             Checksum::Standard => NAK,
-            Checksum::CRC16 => CRC }]));
+            Checksum::CRC16 => CRC }])?;
         debug!("NCG sent. Receiving stream.");
-        let mut packet_num : u8 = 1;
+        let mut packet_num : u32 = 1;
         loop {
-            match try!(get_byte_timeout(dev)) {
+            match get_byte_timeout(dev)? {
                 bt @ Some(SOH) | bt @ Some(STX) => { // Handle next packet
                     let packet_size = match bt {
                         Some(SOH) => 128,
                         Some(STX) => 1024,
                         _ => 0, // Why does the compiler need this?
                     };
-                    let pnum = try!(get_byte(dev)); // specified packet number
-                    let pnum_1c = try!(get_byte(dev)); // same, 1's complemented
+                    let pnum = get_byte(dev)?; // specified packet number
+                    let pnum_1c = get_byte(dev)?; // same, 1's complemented
                     // We'll respond with cancel later if the packet number is wrong
-                    let cancel_packet = packet_num != pnum ||  (255-pnum) != pnum_1c;
+                    let cancel_packet = packet_num as u8 != pnum ||  (255-pnum) != pnum_1c;
                     let mut data : Vec<u8> = Vec::new();
                     data.resize(packet_size,0);
-                    try!(dev.read_exact(&mut data));
+                    dev.read_exact(&mut data)?;
                     let success = match self.checksum_mode {
                         Checksum::Standard => {
-                            let recv_checksum = try!(get_byte(dev));
+                            let recv_checksum = get_byte(dev)?;
                             calc_checksum(&data) == recv_checksum },
                         Checksum::CRC16 => {
                             let recv_checksum =
-                                ( (try!(get_byte(dev)) as u16) << 8) +
-                                try!(get_byte(dev)) as u16;
+                                ( (get_byte(dev)? as u16) << 8) +
+                                get_byte(dev)? as u16;
                             calc_crc(&data) == recv_checksum },
                     };
 
                     if cancel_packet {
-                        try!(dev.write(&[CAN]));
-                            try!(dev.write(&[CAN]));
+                        dev.write(&[CAN])?;
+                            dev.write(&[CAN])?;
                         return Err(Error::Canceled)
                     }
                     if success {
                         packet_num = packet_num.wrapping_add(1);
-                        try!(dev.write(&[ACK]));
-                        try!(outstream.write_all(&data));
+                        dev.write(&[ACK])?;
+                        outstream.write_all(&data)?;
+                        if let Some(callback) = self.packet_callback {
+                            (callback)(packet_num)
+                        }
                     } else {
-                        try!(dev.write(&[NAK]));
+                        dev.write(&[NAK])?;
                         self.errors += 1;
                     }
                 },
                 Some(EOT) => { // End of file
-                    try!(dev.write(&[ACK]));
+                    dev.write(&[ACK])?;
                     break
                 },
                 Some(_) => {
@@ -188,7 +199,7 @@ impl Xmodem {
     fn start_send<D: Read + Write>(&mut self, dev: &mut D) -> Result<()> {
         let mut cancels = 0u32;
         loop {
-            match try!(get_byte_timeout(dev)) {
+            match get_byte_timeout(dev)? {
                 Some(c) => {
                     match c {
                         NAK => {
@@ -233,7 +244,7 @@ impl Xmodem {
         let mut block_num = 0u32;
         loop {
             let mut buff = vec![self.pad_byte; self.block_length as usize + 3];
-            let n = try!(stream.read(&mut buff[3..]));
+            let n = stream.read(&mut buff[3..])?;
             if n == 0 {
                 debug!("Reached EOF");
                 return Ok(());
@@ -260,12 +271,15 @@ impl Xmodem {
             }
 
             debug!("Sending block {}", block_num);
-            try!(dev.write_all(&buff));
+            dev.write_all(&buff)?;
 
-            match try!(get_byte_timeout(dev)) {
+            match get_byte_timeout(dev)? {
                 Some(c) => {
                     if c == ACK {
                         debug!("Received ACK for block {}", block_num);
+                        if let Some(callback) = self.packet_callback {
+                            (callback)(block_num);
+                        }
                         continue
                     } else {
                         warn!("Expected ACK, got {}", c);
@@ -287,9 +301,9 @@ impl Xmodem {
 
     fn finish_send<D: Read + Write>(&mut self, dev: &mut D) -> Result<()> {
         loop {
-            try!(dev.write_all(&[EOT]));
+            dev.write_all(&[EOT])?;
 
-            match try!(get_byte_timeout(dev)) {
+            match get_byte_timeout(dev)? {
                 Some(c) => {
                     if c == ACK {
                         info!("XMODEM transmission successful");
@@ -311,6 +325,36 @@ impl Xmodem {
     }
 }
 
+pub struct XmodemBuilder {
+    xmodem: Xmodem
+}
+
+impl XmodemBuilder {
+    pub fn max_errors(&mut self, val: u32) -> &Self {
+        self.xmodem.max_errors = val;
+        self
+    }
+
+    pub fn pad_byte(&mut self, val: u8) -> &Self {
+        self.xmodem.pad_byte = val;
+        self
+    }
+
+    pub fn block_length(&mut self, val: BlockLength) -> &Self {
+        self.xmodem.block_length = val;
+        self
+    }
+
+    pub fn packet_callback(&mut self, callback: fn(u32)) -> &Self {
+        self.xmodem.packet_callback = Some(callback);
+        self
+    }
+
+    pub fn build(&self) -> Xmodem {
+        self.xmodem
+    }
+}
+
 fn calc_checksum(data: &[u8]) -> u8 {
     data.iter().fold(0, |x, &y| x.wrapping_add(y))
 }
@@ -321,7 +365,7 @@ fn calc_crc(data: &[u8]) -> u16 {
 
 fn get_byte<R: Read>(reader: &mut R) -> std::io::Result<u8> {
     let mut buff = [0];
-    try!(reader.read_exact(&mut buff));
+    reader.read_exact(&mut buff)?;
     Ok(buff[0])
 }
 
