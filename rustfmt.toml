@@ -1,0 +1,11 @@
+edition = "2018"
+max_width = 80
+hard_tabs = true
+tab_spaces = 8
+wrap_comments = true
+format_strings = true
+spaces_around_ranges = true
+binop_separator = "Back"
+newline_style = "Unix"
+error_on_line_overflow = true
+error_on_unformatted = true

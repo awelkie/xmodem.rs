@@ -1,0 +1,9 @@
+[build]
+rustflags = [
+	"-A", "nonstandard-style",
+	"-A", "unused-parens"
+]
+rustdocflags = [
+	"-A", "nonstandard-style",
+	"-A", "unused-parens"
+]
