@@ -11,7 +11,6 @@ use core_io::{self as io, Read, Write};
 use std::io::{self, Read, Write};
 
 use ::log::{debug, error, info, log, warn};
-use crc16;
 
 // TODO: Send CAN byte after too many errors
 // TODO: Handle CAN bytes while sending
@@ -71,6 +70,7 @@ struct XmodemPacket {
 	data: XmodemBuffer,
 }
 
+#[allow(clippy::large_enum_variant)]
 enum XmodemBuffer {
 	Standard([u8; 128]),
 	OneK([u8; 1024]),
@@ -269,12 +269,12 @@ impl Xmodem {
 		self.errors = 0;
 		self.checksum_mode = checksum;
 		debug!("Starting XMODEM receive");
-		dev.write(&[match self.checksum_mode {
+		dev.write_all(&[match self.checksum_mode {
 			Checksum::Standard => NAK,
 			Checksum::CRC16 => CRC,
 		}])?;
 		debug!("NCG sent. Receiving stream.");
-		let mut seqno = 1;
+		let mut seqno: u32 = 1;
 		loop {
 			if (self.errors >= self.max_errors) {
 				error!(
@@ -282,6 +282,7 @@ impl Xmodem {
 					 waiting for data packet {}",
 					self.max_errors, seqno
 				);
+				dev.write_all(&[CAN, CAN]).unwrap_or_default();
 				return Err(Error::ExhaustedRetries);
 			}
 
@@ -290,15 +291,16 @@ impl Xmodem {
 				self.checksum_mode,
 			)) {
 				Ok(Some(x)) => {
-					if (x.seqno != (seqno & 0xFF)) {
-						dev.write(&[CAN])?;
-						dev.write(&[CAN])?;
+					if (u32::from(x.seqno) !=
+						(seqno & 0xFF))
+					{
+						dev.write_all(&[CAN, CAN])?;
 						return (Err(Error::Canceled));
 					}
 					x
 				}
 				Ok(None) => {
-					dev.write(&[ACK])?;
+					dev.write_all(&[ACK])?;
 					break;
 				}
 				Err(Error::Io(e)) => match (e.kind()) {
@@ -310,13 +312,12 @@ impl Xmodem {
 					_ => return (Err(Error::Io(e))),
 				},
 				Err(Error::Checksum) => {
-					dev.write(&[NAK])?;
+					dev.write_all(&[NAK])?;
 					self.errors += 1;
 					continue;
 				}
 				Err(Error::SequenceMismatch) => {
-					dev.write(&[CAN])?;
-					dev.write(&[CAN])?;
+					dev.write_all(&[CAN, CAN])?;
 
 					/* XXX Is this the right code? */
 					return (Err(Error::Canceled));
@@ -328,8 +329,11 @@ impl Xmodem {
 				Err(e) => return (Err(e)),
 			};
 
-			dev.write(&[ACK])?;
-			outstream.write_all(packet.as_ref())?;
+			outstream.write_all(packet.as_ref()).map_err(|e| {
+				dev.write_all(&[CAN, CAN]).unwrap_or_default();
+				Error::Io(e)
+			})?;
+			dev.write_all(&[ACK])?;
 			seqno = seqno.wrapping_add(1);
 		}
 
@@ -470,6 +474,12 @@ impl Xmodem {
 				return Err(Error::ExhaustedRetries);
 			}
 		}
+	}
+}
+
+impl Default for Xmodem {
+	fn default() -> Self {
+		Self::new()
 	}
 }
 
