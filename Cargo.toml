@@ -1,6 +1,6 @@
 [package]
 name = "xmodem"
-version = "0.3.0"
+version = "0.4.0"
 authors = ["Allen Welkie <allen.welkie@gmail.com>",
     "Oxide Computer Co. <https://oxide.computer/>"]
 keywords = ["xmodem", "serial", "no_std"]

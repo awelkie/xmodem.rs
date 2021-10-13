@@ -232,17 +232,18 @@ impl Xmodem {
 		&mut self,
 		dev: &mut D,
 		stream: &mut R,
-	) -> Result<()> {
+	) -> Result<usize> {
+		let bytes;
 		self.errors = 0;
 
 		debug!("Starting XMODEM transfer");
 		self.start_send(dev)?;
 		debug!("First byte received. Sending stream.");
-		self.send_stream(dev, stream)?;
+		bytes = self.send_stream(dev, stream)?;
 		debug!("Sending EOT");
 		self.finish_send(dev)?;
 
-		Ok(())
+		Ok(bytes)
 	}
 
 	/// Receive an XMODEM transmission.
@@ -265,7 +266,7 @@ impl Xmodem {
 		dev: &mut D,
 		outstream: &mut W,
 		checksum: Checksum,
-	) -> Result<()> {
+	) -> Result<usize> {
 		self.errors = 0;
 		self.checksum_mode = checksum;
 		debug!("Starting XMODEM receive");
@@ -275,6 +276,7 @@ impl Xmodem {
 		}])?;
 		debug!("NCG sent. Receiving stream.");
 		let mut seqno: u32 = 1;
+		let mut bytes: usize = 0;
 		loop {
 			if (self.errors >= self.max_errors) {
 				error!(
@@ -335,9 +337,10 @@ impl Xmodem {
 			})?;
 			dev.write_all(&[ACK])?;
 			seqno = seqno.wrapping_add(1);
+			bytes += packet.as_ref().len();
 		}
 
-		Ok(())
+		Ok(bytes)
 	}
 
 	fn start_send<D: Read + Write>(&mut self, dev: &mut D) -> Result<()> {
@@ -397,8 +400,9 @@ impl Xmodem {
 		&mut self,
 		dev: &mut D,
 		stream: &mut R,
-	) -> Result<()> {
-		let mut seqno = 0;
+	) -> Result<usize> {
+		let mut seqno: u32 = 0;
+		let mut bytes: usize = 0;
 		loop {
 			let mut packet = XmodemPacket::new(
 				self.block_length,
@@ -408,12 +412,13 @@ impl Xmodem {
 			let n = stream.read(packet.as_mut())?;
 			if (n == 0) {
 				debug!("Reached EOF");
-				return Ok(());
+				return Ok(bytes);
 			}
 
 			seqno += 1;
 			packet.seqno = u8::try_from(seqno & 0xFF).unwrap();
 			packet.send(dev, self.checksum_mode)?;
+			bytes += n;
 
 			match (get_byte_timeout(dev)?) {
 				Some(ACK) => {

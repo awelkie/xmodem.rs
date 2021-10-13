@@ -66,25 +66,30 @@ fn xmodem_loopback(
 	let handle = std::thread::spawn(move || {
 		let mut xmodem = Xmodem::new();
 		xmodem.block_length = block_length;
-		xmodem.send(&mut p1, &mut &data_out[..]).unwrap();
-		data_out
+		let bytes_out = xmodem.send(
+			&mut p1, &mut &data_out[..]).unwrap();
+		(data_out, bytes_out)
 	});
 	let handle2 = std::thread::spawn(move || {
 		let mut xmodem = Xmodem::new();
 		let mut data_in = vec![0; 0];
-		xmodem.recv(&mut p2, &mut data_in, checksum_mode).unwrap();
-		data_in
+		let bytes_in = xmodem.recv(
+			&mut p2, &mut data_in, checksum_mode).unwrap();
+		(data_in, bytes_in)
 	});
 
-	let mut dato = handle.join().unwrap();
+	let (mut dato, bytes_out) = handle.join().unwrap();
+	assert_eq!(bytes_out, dato.len());
+
 	// Pad output data to multiple of block length for comparison
 	let bl = block_length as usize;
 	for _ in 0 .. (bl - data_len % bl) {
 		dato.push(0x1a);
 	}
-	let dati = handle2.join().unwrap();
+	let (dati, bytes_in) = handle2.join().unwrap();
 	assert_eq!(dato.len(), dati.len());
 	assert_eq!(dato, dati);
+	assert_eq!(bytes_in, dati.len());
 }
 
 #[test]

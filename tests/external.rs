@@ -67,8 +67,9 @@ fn xmodem_recv(
 
 	let mut xmodem = Xmodem::new();
 	let mut recv_data = Vec::new();
-	xmodem.recv(&mut serial_dev, &mut recv_data, checksum_mode)
+	let bytes = xmodem.recv(&mut serial_dev, &mut recv_data, checksum_mode)
 		.unwrap();
+	assert_eq!(bytes, (data_len + 127) & !127);
 
 	let mut sent_data = Vec::new();
 	send_file.seek(std::io::SeekFrom::Start(0)).unwrap();
@@ -124,7 +125,8 @@ fn xmodem_send_standard() {
 	};
 
 	let mut xmodem = Xmodem::new();
-	xmodem.send(&mut serial_dev, &mut &data[..]).unwrap();
+	let bytes = xmodem.send(&mut serial_dev, &mut &data[..]).unwrap();
+	assert_eq!(bytes, data_len);
 
 	let mut received_data = Vec::new();
 	recv_file.read_to_end(&mut received_data).unwrap();
