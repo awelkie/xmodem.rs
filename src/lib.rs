@@ -310,13 +310,12 @@ impl Xmodem {
 		dev: &mut D,
 		stream: &mut R,
 	) -> Result<usize> {
-		let bytes;
 		self.errors = 0;
 
 		debug!("Starting XMODEM transfer");
 		self.start_send(dev)?;
 		debug!("First byte received. Sending stream.");
-		bytes = self.send_stream(dev, stream)?;
+		let bytes = self.send_stream(dev, stream)?;
 		debug!("Sending EOT");
 		self.finish_send(dev)?;
 
