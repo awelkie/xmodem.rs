@@ -1,14 +1,91 @@
 #![cfg_attr(not(feature = "std"), no_std)]
 
-#[cfg(not(feature = "std"))]
 use core::convert::{From, TryFrom};
-#[cfg(feature = "std")]
-use std::convert::{From, TryFrom};
 
 #[cfg(not(feature = "std"))]
-use core_io::{self as io, Read, Write};
+/// In a `no_std` environment, `std::io` is not available.  We
+/// provide a publically available subset of compatible types
+/// and traits required by the rest of the library that must be
+/// implemented by consumers (e.g., nanobl-rs.
+///
+/// Refer to the `std::io` documentation for details.
+pub mod io {
+	use core::{fmt, mem, result};
+
+	#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+	pub enum ErrorKind {
+		TimedOut,
+		Other,
+	}
+
+	#[derive(Debug)]
+	pub struct Error {
+		kind: ErrorKind,
+		message: &'static str,
+	}
+
+	impl Error {
+		pub fn new(kind: ErrorKind, message: &'static str) -> Error {
+			Error { kind, message }
+		}
+
+		pub fn kind(&self) -> ErrorKind {
+			self.kind
+		}
+	}
+
+	impl fmt::Display for Error {
+		fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+			write!(f, "IO error {:?}: {}", self.kind, self.message)
+		}
+	}
+
+	pub type Result<T> = result::Result<T, Error>;
+
+	pub trait Read {
+		fn read(&mut self, buf: &mut [u8]) -> Result<usize>;
+		fn read_exact(&mut self, buf: &mut [u8]) -> Result<()>;
+	}
+
+	pub trait Write {
+		fn flush(&mut self) -> Result<()>;
+		fn write(&mut self, buf: &[u8]) -> Result<usize>;
+		fn write_all(&mut self, buf: &[u8]) -> Result<()>;
+	}
+
+	// Credit where due: this is mostly taken from `std::io`.
+	impl Write for &mut [u8] {
+		#[inline]
+		fn write(&mut self, data: &[u8]) -> Result<usize> {
+			let n = usize::min(data.len(), self.len());
+			let dst = mem::replace(self, &mut []);
+			let (a, b) = dst.split_at_mut(n);
+			a.copy_from_slice(&data[..n]);
+			*self = b;
+			Ok(n)
+		}
+
+		#[inline]
+		fn write_all(&mut self, data: &[u8]) -> Result<()> {
+			if self.write(data)? != data.len() {
+				return Err(Error::new(
+					ErrorKind::Other,
+					"failed to write whole buffer",
+				));
+			}
+			Ok(())
+		}
+
+		#[inline]
+		fn flush(&mut self) -> Result<()> {
+			Ok(())
+		}
+	}
+}
 #[cfg(feature = "std")]
-use std::io::{self, Read, Write};
+use std::io;
+
+use io::{Read, Write};
 
 use ::log::{debug, error, info, log, warn};
 
