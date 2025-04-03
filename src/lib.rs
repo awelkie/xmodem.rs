@@ -1,9 +1,90 @@
-#[macro_use]
-extern crate log;
-extern crate crc16;
+#![cfg_attr(not(feature = "std"), no_std)]
 
-use std::io::{self, Read, Write};
-use std::convert::From;
+use core::convert::{From, TryFrom};
+
+#[cfg(not(feature = "std"))]
+/// In a `no_std` environment, `std::io` is not available.  We
+/// provide a publically available subset of compatible types
+/// and traits required by the rest of the library that must be
+/// implemented by consumers.
+///
+/// Refer to the `std::io` documentation for details.
+pub mod io {
+    use core::{fmt, mem, result};
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub enum ErrorKind {
+        TimedOut,
+        Other,
+    }
+
+    #[derive(Debug)]
+    pub struct Error {
+        kind: ErrorKind,
+        message: &'static str,
+    }
+
+    impl Error {
+        pub fn new(kind: ErrorKind, message: &'static str) -> Error {
+            Error { kind, message }
+        }
+
+        pub fn kind(&self) -> ErrorKind {
+            self.kind
+        }
+    }
+
+    impl fmt::Display for Error {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            write!(f, "IO error {:?}: {}", self.kind, self.message)
+        }
+    }
+
+    pub type Result<T> = result::Result<T, Error>;
+
+    pub trait Read {
+        fn read(&mut self, buf: &mut [u8]) -> Result<usize>;
+        fn read_exact(&mut self, buf: &mut [u8]) -> Result<()>;
+    }
+
+    pub trait Write {
+        fn flush(&mut self) -> Result<()>;
+        fn write(&mut self, buf: &[u8]) -> Result<usize>;
+        fn write_all(&mut self, buf: &[u8]) -> Result<()>;
+    }
+
+    // Credit where due: this is mostly taken from `std::io`.
+    impl Write for &mut [u8] {
+        #[inline]
+        fn write(&mut self, data: &[u8]) -> Result<usize> {
+            let n = usize::min(data.len(), self.len());
+            let dst = mem::replace(self, &mut []);
+            let (a, b) = dst.split_at_mut(n);
+            a.copy_from_slice(&data[..n]);
+            *self = b;
+            Ok(n)
+        }
+
+        #[inline]
+        fn write_all(&mut self, data: &[u8]) -> Result<()> {
+            if self.write(data)? != data.len() {
+                return Err(Error::new(ErrorKind::Other, "failed to write whole buffer"));
+            }
+            Ok(())
+        }
+
+        #[inline]
+        fn flush(&mut self) -> Result<()> {
+            Ok(())
+        }
+    }
+}
+#[cfg(feature = "std")]
+use std::io;
+
+use io::{Read, Write};
+
+use ::log::{debug, error, info, warn};
 
 // TODO: Send CAN byte after too many errors
 // TODO: Handle CAN bytes while sending
@@ -17,18 +98,27 @@ const NAK: u8 = 0x15;
 const CAN: u8 = 0x18;
 const CRC: u8 = 0x43;
 
-pub type Result<T> = std::result::Result<T, Error>;
+pub type Result<T> = core::result::Result<T, Error>;
 
 #[derive(Debug)]
 pub enum Error {
     Io(io::Error),
 
-    /// The number of communications errors exceeded `max_errors` in a single
-    /// transmission.
+    /// The number of communications errors exceeded `max_errors` in a
+    /// single transmission.
     ExhaustedRetries,
 
     /// The transmission was canceled by the other end of the channel.
     Canceled,
+
+    /// Data was received that is not appropriate to the transfer state.
+    Invalid,
+
+    /// A packet was received with mismatched sequence numbers.
+    SequenceMismatch,
+
+    /// A packet was received with an incorrect checksum or CRC16.
+    Checksum,
 }
 
 impl From<io::Error> for Error {
@@ -49,22 +139,136 @@ pub enum BlockLength {
     OneK = 1024,
 }
 
+struct XmodemPacket {
+    pub seqno: u8,
+    data: XmodemBuffer,
+}
+
+#[allow(clippy::large_enum_variant)]
+enum XmodemBuffer {
+    Standard([u8; 128]),
+    OneK([u8; 1024]),
+}
+
+impl XmodemPacket {
+    pub fn new(l: BlockLength, pad: u8) -> Self {
+        match l {
+            BlockLength::Standard => XmodemPacket {
+                seqno: 0,
+                data: XmodemBuffer::Standard([pad; 128]),
+            },
+            BlockLength::OneK => XmodemPacket {
+                seqno: 0,
+                data: XmodemBuffer::OneK([pad; 1024]),
+            },
+        }
+    }
+
+    fn recv_next<R: Read>(r: &mut R, c: Checksum) -> Result<Option<Self>> {
+        let mut ret = match get_byte(r)? {
+            SOH => Self::new(BlockLength::Standard, 0),
+            STX => Self::new(BlockLength::OneK, 0),
+            EOT => return Ok(None),
+            _ => return Err(Error::Invalid),
+        };
+
+        /*
+         * The next two bytes are the packet sequence number mod 256
+         * and the 1's complement of that.  If they don't match we'll
+         * return an error later; we still need to read the packet
+         * to maintain proper transaction state.
+         */
+        let recv_seqno = get_byte(r)?;
+        let recv_seqno1c = get_byte(r)?;
+
+        r.read_exact(ret.as_mut())?;
+
+        let checksum_ok = match c {
+            Checksum::Standard => {
+                let recv_checksum = get_byte(r)?;
+                calc_checksum(ret.as_ref()) == recv_checksum
+            }
+            Checksum::CRC16 => {
+                calc_crc(ret.as_ref()) == u16::from_be_bytes([get_byte(r)?, get_byte(r)?])
+            }
+        };
+
+        if 0xFF - recv_seqno != recv_seqno1c {
+            return Err(Error::SequenceMismatch);
+        }
+
+        if checksum_ok {
+            ret.seqno = recv_seqno;
+            return Ok(Some(ret));
+        }
+
+        Err(Error::Checksum)
+    }
+
+    fn send<W: Write>(&self, w: &mut W, c: Checksum) -> Result<()> {
+        let header: [u8; 3] = [
+            match self.data {
+                XmodemBuffer::Standard(_) => SOH,
+                XmodemBuffer::OneK(_) => STX,
+            },
+            self.seqno,
+            0xFF - self.seqno,
+        ];
+
+        debug!("Sending block {}", self.seqno);
+        w.write_all(&header)?;
+        w.write_all(self.as_ref())?;
+
+        match c {
+            Checksum::Standard => {
+                w.write_all(&[calc_checksum(self.as_ref())])?;
+            }
+            Checksum::CRC16 => {
+                w.write_all(&calc_crc(self.as_ref()).to_be_bytes())?;
+            }
+        }
+
+        Ok(())
+    }
+}
+
+impl AsRef<[u8]> for XmodemPacket {
+    fn as_ref(&self) -> &[u8] {
+        match self.data {
+            XmodemBuffer::Standard(ref b) => b,
+            XmodemBuffer::OneK(ref b) => b,
+        }
+    }
+}
+
+impl AsMut<[u8]> for XmodemPacket {
+    fn as_mut(&mut self) -> &mut [u8] {
+        match self.data {
+            XmodemBuffer::Standard(ref mut b) => b,
+            XmodemBuffer::OneK(ref mut b) => b,
+        }
+    }
+}
+
 /// Configuration for the XMODEM transfer.
 #[derive(Copy, Clone, Debug)]
 pub struct Xmodem {
     /// The number of errors that can occur before the communication is
-    /// considered a failure. Errors include unexpected bytes and timeouts waiting for bytes.
+    /// considered a failure. Errors include unexpected bytes and timeouts
+    /// waiting for bytes.
     pub max_errors: u32,
 
-    /// The byte used to pad the last block. XMODEM can only send blocks of a certain size,
-    /// so if the message is not a multiple of that size the last block needs to be padded.
+    /// The byte used to pad the last block. XMODEM can only send blocks of
+    /// a certain size, so if the message is not a multiple of that size
+    /// the last block needs to be padded.
     pub pad_byte: u8,
 
-    /// The length of each block. There are only two options: 128-byte blocks (standard
-    ///  XMODEM) or 1024-byte blocks (XMODEM-1k).
+    /// The length of each block. There are only two options: 128-byte
+    /// blocks (standard  XMODEM) or 1024-byte blocks (XMODEM-1k).
     pub block_length: BlockLength,
 
-    /// The checksum mode used by XMODEM. This is determined by the receiver.
+    /// The checksum mode used by XMODEM. This is determined by the
+    /// receiver.
     checksum_mode: Checksum,
     errors: u32,
 }
@@ -83,144 +287,155 @@ impl Xmodem {
 
     /// Starts the XMODEM transmission.
     ///
-    /// `dev` should be the serial communication channel (e.g. the serial device).
-    /// `stream` should be the message to send (e.g. a file).
+    /// `dev` should be the serial communication channel (e.g. the serial
+    /// device). `stream` should be the message to send (e.g. a file).
     ///
     /// # Timeouts
-    /// This method has no way of setting the timeout of `dev`, so it's up to the caller
-    /// to set the timeout of the device before calling this method. Timeouts on receiving
-    /// bytes will be counted against `max_errors`, but timeouts on transmitting bytes
-    /// will be considered a fatal error.
-    pub fn send<D: Read + Write, R: Read>(&mut self, dev: &mut D, stream: &mut R) -> Result<()> {
+    /// This method has no way of setting the timeout of `dev`, so it's up
+    /// to the caller to set the timeout of the device before calling this
+    /// method. Timeouts on receiving bytes will be counted against
+    /// `max_errors`, but timeouts on transmitting bytes will be considered
+    /// a fatal error.
+    pub fn send<D: Read + Write, R: Read>(&mut self, dev: &mut D, stream: &mut R) -> Result<usize> {
         self.errors = 0;
 
         debug!("Starting XMODEM transfer");
-        try!(self.start_send(dev));
+        self.start_send(dev)?;
         debug!("First byte received. Sending stream.");
-        try!(self.send_stream(dev, stream));
+        let bytes = self.send_stream(dev, stream)?;
         debug!("Sending EOT");
-        try!(self.finish_send(dev));
+        self.finish_send(dev)?;
 
-        Ok(())
+        Ok(bytes)
     }
 
     /// Receive an XMODEM transmission.
     ///
-    /// `dev` should be the serial communication channel (e.g. the serial device).
-    /// The received data will be written to `outstream`.
-    /// `checksum` indicates which checksum mode should be used; Checksum::Standard is
-    /// a reasonable default.
+    /// `dev` should be the serial communication channel (e.g. the serial
+    /// device). The received data will be written to `outstream`.
+    /// `checksum` indicates which checksum mode should be used;
+    /// Checksum::Standard is the original wrapping 8-bit checksum; you
+    /// probably want CRC16 if the remote supports it (which, in 2021, it's
+    /// all but certain to do).
     ///
     /// # Timeouts
-    /// This method has no way of setting the timeout of `dev`, so it's up to the caller
-    /// to set the timeout of the device before calling this method. Timeouts on receiving
-    /// bytes will be counted against `max_errors`, but timeouts on transmitting bytes
-    /// will be considered a fatal error.
-    pub fn recv<D: Read + Write, W: Write>(&mut self,
-                                           dev: &mut D,
-                                           outstream: &mut W,
-                                           checksum : Checksum) -> Result<()> {
+    /// This method has no way of setting the timeout of `dev`, so it's up
+    /// to the caller to set the timeout of the device before calling this
+    /// method. Timeouts on receiving bytes will be counted against
+    /// `max_errors`, but timeouts on transmitting bytes will be considered
+    /// a fatal error.
+    pub fn recv<D: Read + Write, W: Write>(
+        &mut self,
+        dev: &mut D,
+        outstream: &mut W,
+        checksum: Checksum,
+    ) -> Result<usize> {
         self.errors = 0;
         self.checksum_mode = checksum;
         debug!("Starting XMODEM receive");
-        try!(dev.write(&[match self.checksum_mode {
+        dev.write_all(&[match self.checksum_mode {
             Checksum::Standard => NAK,
-            Checksum::CRC16 => CRC }]));
+            Checksum::CRC16 => CRC,
+        }])?;
         debug!("NCG sent. Receiving stream.");
-        let mut packet_num : u8 = 1;
+        let mut seqno: u32 = 1;
+        let mut bytes: usize = 0;
         loop {
-            match try!(get_byte_timeout(dev)) {
-                bt @ Some(SOH) | bt @ Some(STX) => { // Handle next packet
-                    let packet_size = match bt {
-                        Some(SOH) => 128,
-                        Some(STX) => 1024,
-                        _ => 0, // Why does the compiler need this?
-                    };
-                    let pnum = try!(get_byte(dev)); // specified packet number
-                    let pnum_1c = try!(get_byte(dev)); // same, 1's complemented
-                    // We'll respond with cancel later if the packet number is wrong
-                    let cancel_packet = packet_num != pnum ||  (255-pnum) != pnum_1c;
-                    let mut data : Vec<u8> = Vec::new();
-                    data.resize(packet_size,0);
-                    try!(dev.read_exact(&mut data));
-                    let success = match self.checksum_mode {
-                        Checksum::Standard => {
-                            let recv_checksum = try!(get_byte(dev));
-                            calc_checksum(&data) == recv_checksum },
-                        Checksum::CRC16 => {
-                            let recv_checksum =
-                                ( (try!(get_byte(dev)) as u16) << 8) +
-                                try!(get_byte(dev)) as u16;
-                            calc_crc(&data) == recv_checksum },
-                    };
-
-                    if cancel_packet {
-                        try!(dev.write(&[CAN]));
-                            try!(dev.write(&[CAN]));
-                        return Err(Error::Canceled)
-                    }
-                    if success {
-                        packet_num = packet_num.wrapping_add(1);
-                        try!(dev.write(&[ACK]));
-                        try!(outstream.write_all(&data));
-                    } else {
-                        try!(dev.write(&[NAK]));
-                        self.errors += 1;
-                    }
-                },
-                Some(EOT) => { // End of file
-                    try!(dev.write(&[ACK]));
-                    break
-                },
-                Some(_) => {
-                    warn!("Unrecognized symbol!");
-                },
-                None => { self.errors += 1; warn!("Timeout!") },
-            }
             if self.errors >= self.max_errors {
-                error!("Exhausted max retries ({}) while waiting for ACK for EOT", self.max_errors);
+                error!(
+                    "Exhausted max retries ({}) while waiting for data packet {}",
+                    self.max_errors, seqno
+                );
+                dev.write_all(&[CAN, CAN]).unwrap_or_default();
                 return Err(Error::ExhaustedRetries);
             }
-        }
-        Ok(())
-    }
-          
-    fn start_send<D: Read + Write>(&mut self, dev: &mut D) -> Result<()> {
-        let mut cancels = 0u32;
-        loop {
-            match try!(get_byte_timeout(dev)) {
-                Some(c) => {
-                    match c {
-                        NAK => {
-                            debug!("Standard checksum requested");
-                            self.checksum_mode = Checksum::Standard;
-                            return Ok(());
-                        }
-                        CRC => {
-                            debug!("16-bit CRC requested");
-                            self.checksum_mode = Checksum::CRC16;
-                            return Ok(());
-                        }
-                        CAN => {
-                            warn!("Cancel (CAN) byte received");
-                            cancels += 1;
-                        },
-                        c => warn!("Unknown byte received at start of XMODEM transfer: {}", c),
+
+            let packet = match XmodemPacket::recv_next(dev, self.checksum_mode) {
+                Ok(Some(x)) => {
+                    if u32::from(x.seqno) != (seqno & 0xFF) {
+                        dev.write_all(&[CAN, CAN])?;
+                        return Err(Error::Canceled);
                     }
+                    x
+                }
+                Ok(None) => {
+                    dev.write_all(&[ACK])?;
+                    break;
+                }
+                Err(Error::Io(e)) => match e.kind() {
+                    io::ErrorKind::TimedOut => {
+                        self.errors += 1;
+                        warn!("Timeout!");
+                        continue;
+                    }
+                    _ => return Err(Error::Io(e)),
                 },
+                Err(Error::Checksum) => {
+                    dev.write_all(&[NAK])?;
+                    self.errors += 1;
+                    continue;
+                }
+                Err(Error::SequenceMismatch) => {
+                    dev.write_all(&[CAN, CAN])?;
+
+                    /* XXX Is this the right code? */
+                    return Err(Error::Canceled);
+                }
+                Err(Error::Invalid) => {
+                    warn!("Unrecognized symbol!");
+                    continue;
+                }
+                Err(e) => return Err(e),
+            };
+
+            outstream.write_all(packet.as_ref()).map_err(|e| {
+                dev.write_all(&[CAN, CAN]).unwrap_or_default();
+                Error::Io(e)
+            })?;
+            dev.write_all(&[ACK])?;
+            seqno = seqno.wrapping_add(1);
+            bytes += packet.as_ref().len();
+        }
+
+        Ok(bytes)
+    }
+
+    fn start_send<D: Read + Write>(&mut self, dev: &mut D) -> Result<()> {
+        let mut cancels = 0;
+        loop {
+            match get_byte_timeout(dev)? {
+                Some(NAK) => {
+                    debug!("Standard checksum requested");
+                    self.checksum_mode = Checksum::Standard;
+                    return Ok(());
+                }
+                Some(CRC) => {
+                    debug!("16-bit CRC requested");
+                    self.checksum_mode = Checksum::CRC16;
+                    return Ok(());
+                }
+                Some(CAN) => {
+                    warn!("Cancel (CAN) byte received");
+                    cancels += 1;
+                }
+                Some(c) => warn!("Unknown byte received at start of XMODEM transfer: {}", c),
                 None => warn!("Timed out waiting for start of XMODEM transfer."),
             }
 
             self.errors += 1;
 
             if cancels >= 2 {
-                error!("Transmission canceled: received two cancel (CAN) bytes \
-                        at start of XMODEM transfer");
+                error!(
+                    "Transmission canceled: received two cancel (CAN) bytes at start of XMODEM transfer"
+                );
                 return Err(Error::Canceled);
             }
 
             if self.errors >= self.max_errors {
-                error!("Exhausted max retries ({}) at start of XMODEM transfer.", self.max_errors);
+                error!(
+                    "Exhausted max retries ({}) at start of XMODEM transfer.",
+                    self.max_errors
+                );
                 if let Err(err) = dev.write_all(&[CAN]) {
                     warn!("Error sending CAN byte: {}", err);
                 }
@@ -229,57 +444,46 @@ impl Xmodem {
         }
     }
 
-    fn send_stream<D: Read + Write, R: Read>(&mut self, dev: &mut D, stream: &mut R) -> Result<()> {
-        let mut block_num = 0u32;
+    fn send_stream<D: Read + Write, R: Read>(
+        &mut self,
+        dev: &mut D,
+        stream: &mut R,
+    ) -> Result<usize> {
+        let mut seqno: u32 = 0;
+        let mut bytes: usize = 0;
         loop {
-            let mut buff = vec![self.pad_byte; self.block_length as usize + 3];
-            let n = try!(stream.read(&mut buff[3..]));
+            let mut packet = XmodemPacket::new(self.block_length, self.pad_byte);
+
+            let n = stream.read(packet.as_mut())?;
             if n == 0 {
                 debug!("Reached EOF");
-                return Ok(());
+                return Ok(bytes);
             }
 
-            block_num += 1;
-            buff[0] = match self.block_length {
-                BlockLength::Standard => SOH,
-                BlockLength::OneK => STX,
-            };
-            buff[1] = (block_num & 0xFF) as u8;
-            buff[2] = 0xFF - buff[1];
+            seqno += 1;
+            packet.seqno = u8::try_from(seqno & 0xFF).unwrap();
+            packet.send(dev, self.checksum_mode)?;
+            bytes += n;
 
-            match self.checksum_mode {
-                Checksum::Standard => {
-                    let checksum = calc_checksum(&buff[3..]);
-                    buff.push(checksum);
-                },
-                Checksum::CRC16 => {
-                    let crc = calc_crc(&buff[3..]);
-                    buff.push(((crc >> 8) & 0xFF) as u8);
-                    buff.push((crc & 0xFF) as u8);
+            match get_byte_timeout(dev)? {
+                Some(ACK) => {
+                    debug!("Received ACK for block {}", seqno);
+                    continue;
                 }
-            }
-
-            debug!("Sending block {}", block_num);
-            try!(dev.write_all(&buff));
-
-            match try!(get_byte_timeout(dev)) {
-                Some(c) => {
-                    if c == ACK {
-                        debug!("Received ACK for block {}", block_num);
-                        continue
-                    } else {
-                        warn!("Expected ACK, got {}", c);
-                    }
-                    // TODO handle CAN bytes
-                },
-                None => warn!("Timeout waiting for ACK for block {}", block_num),
+                // TODO handle CAN bytes
+                Some(b) => {
+                    warn!("Expected ACK, got {}", b);
+                }
+                None => warn!("Timeout waiting for ACK for block {}", seqno),
             }
 
             self.errors += 1;
 
             if self.errors >= self.max_errors {
-                error!("Exhausted max retries ({}) while sending block {} in XMODEM transfer",
-                       self.max_errors, block_num);
+                error!(
+                    "Exhausted max retries ({}) while sending block {} in XMODEM transfer",
+                    self.max_errors, seqno
+                );
                 return Err(Error::ExhaustedRetries);
             }
         }
@@ -287,27 +491,37 @@ impl Xmodem {
 
     fn finish_send<D: Read + Write>(&mut self, dev: &mut D) -> Result<()> {
         loop {
-            try!(dev.write_all(&[EOT]));
+            dev.write_all(&[EOT])?;
 
-            match try!(get_byte_timeout(dev)) {
-                Some(c) => {
-                    if c == ACK {
-                        info!("XMODEM transmission successful");
-                        return Ok(());
-                    } else {
-                        warn!("Expected ACK, got {}", c);
-                    }
-                },
-                None => warn!("Timeout waiting for ACK for EOT"),
+            match get_byte_timeout(dev)? {
+                Some(ACK) => {
+                    info!("XMODEM transmission successful");
+                    return Ok(());
+                }
+                Some(b) => {
+                    warn!("Expected ACK, got {}", b);
+                }
+                None => {
+                    warn!("Timeout waiting for ACK for EOT")
+                }
             }
 
             self.errors += 1;
 
             if self.errors >= self.max_errors {
-                error!("Exhausted max retries ({}) while waiting for ACK for EOT", self.max_errors);
+                error!(
+                    "Exhausted max retries ({}) while waiting for ACK for EOT",
+                    self.max_errors
+                );
                 return Err(Error::ExhaustedRetries);
             }
         }
+    }
+}
+
+impl Default for Xmodem {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -319,14 +533,14 @@ fn calc_crc(data: &[u8]) -> u16 {
     crc16::State::<crc16::XMODEM>::calculate(data)
 }
 
-fn get_byte<R: Read>(reader: &mut R) -> std::io::Result<u8> {
+fn get_byte<R: Read>(reader: &mut R) -> io::Result<u8> {
     let mut buff = [0];
-    try!(reader.read_exact(&mut buff));
+    reader.read_exact(&mut buff)?;
     Ok(buff[0])
 }
 
 /// Turns timeout errors into `Ok(None)`
-fn get_byte_timeout<R: Read>(reader: &mut R) -> std::io::Result<Option<u8>> {
+fn get_byte_timeout<R: Read>(reader: &mut R) -> io::Result<Option<u8>> {
     match get_byte(reader) {
         Ok(c) => Ok(Some(c)),
         Err(err) => {
