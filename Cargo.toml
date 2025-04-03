@@ -1,16 +1,21 @@
 [package]
 name = "xmodem"
-version = "0.1.3"
+version = "0.4.0"
 authors = ["Allen Welkie <allen.welkie@gmail.com>"]
-keywords = ["xmodem", "ymodem", "zmodem", "serial"]
+keywords = ["xmodem", "serial", "no_std"]
 repository = "https://github.com/awelkie/xmodem.rs"
 license = "MIT"
 description = "An implementation of the XMODEM file-transfer protocol."
+edition = "2024"
 
 [dependencies]
-log = "^0.3"
-crc16 = "^0.3"
+log = { version = "0.4", default-features = false }
+crc16 = "0.4"
 
 [dev-dependencies]
-tempfile = "^2.0"
-rand = "^0.3"
+tempfile = "3.0"
+rand = "0.9"
+
+[features]
+std = []
+default = ["std"]

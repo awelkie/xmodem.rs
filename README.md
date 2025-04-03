@@ -1,13 +1,22 @@
 # XMODEM.rs
 
-[![Build Status](https://travis-ci.org/awelkie/xmodem.rs.svg?branch=master)](https://travis-ci.org/awelkie/xmodem.rs)
-[![](https://img.shields.io/crates/v/xmodem.svg)](https://crates.io/crates/xmodem)
-[![](https://img.shields.io/crates/l/xmodem.svg)](https://crates.io/crates/xmodem)
-
 The XMODEM protocol in Rust
 
-# Testing
-The tests require the binaries found in the `lrzsz` package.
+This is derived from https://github.com/awelkie/xmodem.rs.  It has been modified
+primarily to support `no_std` use and for use with the 2018 edition.  All four
+permutations of standard 128-byte and 1024-byte block sizes, classic and CRC16
+variants are supported for send and receive.  YMODEM and ZMODEM are not
+implemented.  In addition, the `send` and `recv` methods return the number of
+bytes of data sent or received.
 
-# Rust channels
-Currently only the beta and nightly channels are supported (stable support is waiting on [#27585](https://github.com/rust-lang/rust/issues/27585))
+For a `no_std` build, it is necessary to request the `core` feature in addition
+to `--no-default-features` or `default-features = false` on account of
+cargo#1839.  Additionally, your compiler must be known to `core_io`.  Changes
+are welcome to allow the use of alternate crates providing `Read` and `Write`
+traits with the same signatures as those in `std::io`; unfortunately this does
+not include (most of?) the Embedded HAL crates, which provide slightly different
+signatures.
+
+# Testing
+The tests require the binaries found in the `lrzsz` package.  There are no tests
+for the `no_std` build.
